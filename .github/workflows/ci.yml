@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  sanitizers:
+    name: tests (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, undefined]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug -DCLIPD_SANITIZE=${{ matrix.sanitizer }}
+      - name: Build tests
+        run: cmake --build build --target clipd_tests
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1
+
+  release:
+    name: build + tests (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build all targets
+        run: cmake --build build
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Recovery demo (smoke)
+        run: ./scripts/torn_write_demo.sh ./build/clipd-cli

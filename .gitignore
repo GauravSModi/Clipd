@@ -1,0 +1,16 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# Local agent / editor config
+.claude/settings.local.json
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs produced by the CLI/demos
+*.log

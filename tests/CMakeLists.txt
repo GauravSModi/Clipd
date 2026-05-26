@@ -15,8 +15,12 @@ add_executable(clipd_tests
   test_fuzzy_matcher.cpp
   test_log.cpp
   test_core.cpp
+  test_c_api.cpp
+  c_smoke.c
 )
-target_link_libraries(clipd_tests PRIVATE clipd_core GTest::gtest_main)
+# clipd_capi PUBLIC-links clipd_core, so linking it alone pulls in the core and
+# its include dir for the unit tests that exercise the C++ layer directly.
+target_link_libraries(clipd_tests PRIVATE clipd_capi GTest::gtest_main)
 clipd_apply_sanitizer(clipd_tests)
 
 include(GoogleTest)

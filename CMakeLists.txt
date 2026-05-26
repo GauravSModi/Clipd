@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(clipd LANGUAGES CXX)
+project(clipd LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Emit compile_commands.json so clangd sees real flags (C++20, includes, deps).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
@@ -38,6 +41,15 @@ add_library(clipd_core
 target_include_directories(clipd_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_options(clipd_core PRIVATE -Wall -Wextra -Wpedantic)
 clipd_apply_sanitizer(clipd_core)
+
+# --- C API library ----------------------------------------------------------
+# Flat extern "C" boundary (clipd.h) for the Swift shell. A thin adapter over
+# clipd_core; PUBLIC-links it so consumers (tests, Swift) get the core and its
+# src/ include dir transitively.
+add_library(clipd_capi src/c_api.cpp)
+target_link_libraries(clipd_capi PUBLIC clipd_core)
+target_compile_options(clipd_capi PRIVATE -Wall -Wextra -Wpedantic)
+clipd_apply_sanitizer(clipd_capi)
 
 # --- CLI harness ------------------------------------------------------------
 add_executable(clipd-cli cli/main.cpp)

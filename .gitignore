@@ -6,6 +6,12 @@ cmake-build-*/
 # Local agent / editor config
 .claude/settings.local.json
 
+# clangd: symlink to the active build's compile DB
+/compile_commands.json
+
+# clangd: local background-index cache
+.cache/
+
 # Editor / OS
 .DS_Store
 .idea/

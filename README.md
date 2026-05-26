@@ -35,6 +35,17 @@ cmake --build build-asan && ctest --test-dir build-asan
 # ...and -DCLIPD_SANITIZE=undefined
 ```
 
+### Editor setup (clangd)
+
+The build emits a `compile_commands.json`; symlink it at the repo root so
+clangd picks up the real flags (it's gitignored):
+
+```sh
+ln -sf build/compile_commands.json compile_commands.json
+```
+
+Point it at `build-asan/` instead if you want sanitizer-aware diagnostics.
+
 ## The storage engine
 
 Each record is written as `[length][crc32][payload]`. On startup the log is

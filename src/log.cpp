@@ -3,6 +3,7 @@
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
 #include <utility>
 
 #include "crc32.hpp"
@@ -61,15 +62,29 @@ std::string read_file(const std::filesystem::path& path) {
 Log::Log(std::filesystem::path path) : path_(std::move(path)) {}
 
 void Log::open() {
-  if (!std::filesystem::exists(path_)) {
-    std::ofstream f(path_, std::ios::binary);  // create empty
+  // Open for append: creates the file if missing and verifies it's writable.
+  // A missing/unwritable path leaves the stream in a fail state, which we
+  // surface rather than silently ignore (a dropped write must not look like a
+  // success to callers up the stack).
+  std::ofstream f(path_, std::ios::binary | std::ios::app);
+  if (!f) {
+    throw std::runtime_error("clipd: cannot open log for writing: " +
+                             path_.string());
   }
 }
 
 void Log::append(const Entry& e) {
   std::ofstream f(path_, std::ios::binary | std::ios::app);
+  if (!f) {
+    throw std::runtime_error("clipd: cannot open log for append: " +
+                             path_.string());
+  }
   std::string record = encode_record(e);
   f.write(record.data(), static_cast<std::streamsize>(record.size()));
+  if (!f) {
+    throw std::runtime_error("clipd: failed to append to log: " +
+                             path_.string());
+  }
 }
 
 void Log::replay(const std::function<void(const Entry&)>& on_entry) {

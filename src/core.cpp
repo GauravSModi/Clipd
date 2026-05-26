@@ -37,8 +37,10 @@ void Core::start() {
 }
 
 void Core::add(std::string text, int64_t timestamp) {
-  store_.upsert(text, timestamp);   // dedup policy lives in the store
-  log_.append(Entry{std::move(text), timestamp});
+  // Durable first: append before mutating the store, so a failed write throws
+  // and leaves the store untouched (memory and disk never disagree mid-session).
+  log_.append(Entry{text, timestamp});
+  store_.upsert(std::move(text), timestamp);  // dedup policy lives in the store
 }
 
 std::vector<ScoredEntry> Core::search(std::string_view query, size_t max_results,

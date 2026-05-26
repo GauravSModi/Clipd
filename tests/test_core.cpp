@@ -169,4 +169,23 @@ TEST_F(CoreTest, CompactionPreservesRecencyOrderOnReplay) {
   EXPECT_EQ(texts[2], "oldest");
 }
 
+TEST_F(CoreTest, FailedAddLeavesStoreUnchanged) {
+  // add() appends to the log before mutating the store, so a failed write
+  // leaves the store untouched — the two never disagree mid-session.
+  fs::path dir = fs::temp_directory_path() /
+                 ("clipd_core_addfail_" +
+                  std::to_string(reinterpret_cast<uintptr_t>(this)));
+  fs::remove_all(dir);
+  fs::create_directory(dir);
+
+  Core core(dir / "log", 100, kNoAutoCompact);
+  core.start();
+  core.add("ok", 1);
+  ASSERT_EQ(core.stats().entry_count, 1u);
+
+  fs::remove_all(dir);  // log's parent is gone: the next append must fail
+  EXPECT_THROW(core.add("dropped", 2), std::exception);
+  EXPECT_EQ(core.stats().entry_count, 1u);  // store not mutated by a failed add
+}
+
 }  // namespace

@@ -190,4 +190,28 @@ TEST_F(LogTest, CompactionResultIsItselfReplayable) {
   EXPECT_EQ(entries[1].text, "added");
 }
 
+TEST_F(LogTest, OpenOnUnwritablePathThrows) {
+  // Log lives under a directory that does not exist, so the file cannot be
+  // created. open() must surface this, not swallow the failed stream.
+  fs::path bad = fs::temp_directory_path() /
+                 ("clipd_no_such_dir_" +
+                  std::to_string(reinterpret_cast<uintptr_t>(this))) /
+                 "log";
+  fs::remove_all(bad.parent_path());  // make sure the parent really is absent
+  Log log(bad);
+  EXPECT_THROW(log.open(), std::exception);
+}
+
+TEST_F(LogTest, AppendOnUnwritablePathThrows) {
+  // The directory is gone, so the append stream can't open. A failed write must
+  // throw, not be silently dropped.
+  fs::path bad = fs::temp_directory_path() /
+                 ("clipd_no_such_dir_append_" +
+                  std::to_string(reinterpret_cast<uintptr_t>(this))) /
+                 "log";
+  fs::remove_all(bad.parent_path());
+  Log log(bad);
+  EXPECT_THROW(log.append({"x", 1}), std::exception);
+}
+
 }  // namespace

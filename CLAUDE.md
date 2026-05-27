@@ -8,7 +8,7 @@ shell comes later.
 
 4-phase project, each phase gets its own approved plan cycle:
 1. **C++ core** (standalone, CLI-driven) — **DONE**
-2. C API boundary (`extern "C"` lib + flat header)
+2. C API boundary (`extern "C"` lib + flat header) — **DONE**
 3. Swift shell (menu bar, pasteboard polling, hotkey)
 4. Polish (eviction, persistence hardening, README/benchmarks)
 

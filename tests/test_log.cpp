@@ -190,6 +190,88 @@ TEST_F(LogTest, CompactionResultIsItselfReplayable) {
   EXPECT_EQ(entries[1].text, "added");
 }
 
+TEST_F(LogTest, MidStreamCorruptionTruncatesEverythingAfter) {
+  uint64_t after_first = 0;
+  {
+    Log log(path_);
+    log.open();
+    log.append({"good1", 1});
+    after_first = file_size();  // end of the first, fully-valid record
+    log.append({"good2", 2});
+    log.append({"good3", 3});
+  }
+  // Corrupt a payload byte of the SECOND record — mid-stream, not the tail. The
+  // third record after it stays a perfectly valid record on disk.
+  {
+    std::fstream f(path_, std::ios::binary | std::ios::in | std::ios::out);
+    std::streamoff off = static_cast<std::streamoff>(after_first) + 8;  // good2's first payload byte
+    f.seekg(off);
+    char c = '\x00';
+    f.read(&c, 1);
+    f.seekp(off);
+    c = static_cast<char>(c ^ 0xFF);
+    f.write(&c, 1);
+  }
+  // Replay stops at the first invalid record and truncates everything past it —
+  // good3 is discarded despite being valid, because it lies beyond the torn
+  // point. The log must never resurrect data after a break.
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].text, "good1");
+  EXPECT_EQ(file_size(), after_first);
+  // A second replay sees a clean, single-record log.
+  EXPECT_EQ(replay_all().size(), 1u);
+}
+
+TEST_F(LogTest, StaleTmpFileDoesNotAffectReplay) {
+  {
+    Log log(path_);
+    log.open();
+    log.append({"a", 1});
+    log.append({"b", 2});
+  }
+  // An interrupted earlier compaction could leave a ".tmp" sibling behind.
+  fs::path tmp = path_;
+  tmp += ".tmp";
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    const std::string junk = "not a valid clipd record";
+    f.write(junk.data(), static_cast<std::streamsize>(junk.size()));
+  }
+  // Replay reads the real log, never the stray ".tmp".
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 2u);
+  EXPECT_EQ(entries[1].text, "b");
+  // A fresh compaction overwrites the stale ".tmp" and consumes it via the
+  // rename, leaving no leftover.
+  {
+    Log log(path_);
+    log.compact({{"a", 1}, {"b", 2}});
+  }
+  EXPECT_FALSE(fs::exists(tmp));
+  EXPECT_EQ(replay_all().size(), 2u);
+}
+
+TEST_F(LogTest, CompactionLeavesNoTmpFile) {
+  {
+    Log log(path_);
+    log.open();
+    log.append({"x", 1});
+    log.append({"y", 2});
+  }
+  fs::path tmp = path_;
+  tmp += ".tmp";
+  {
+    Log log(path_);
+    log.compact({{"y", 2}});
+  }
+  // The fsync-then-rename path must consume the temp file, never leave it behind.
+  EXPECT_FALSE(fs::exists(tmp));
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].text, "y");
+}
+
 TEST_F(LogTest, OpenOnUnwritablePathThrows) {
   // Log lives under a directory that does not exist, so the file cannot be
   // created. open() must surface this, not swallow the failed stream.

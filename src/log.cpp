@@ -1,5 +1,8 @@
 #include "log.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -13,6 +16,49 @@ namespace {
 
 constexpr size_t kHeaderSize = 8;     // uint32 length + uint32 crc32
 constexpr size_t kTimestampSize = 8;  // int64 timestamp
+
+// Flush a file's contents to stable storage. On Apple, plain fsync only pushes
+// to the drive's write cache; F_FULLFSYNC forces a barrier to the platter/flash,
+// which is what crash-durability actually requires. Throws on failure so a
+// dropped sync never masquerades as a durable write.
+void full_fsync_file(const std::filesystem::path& path) {
+  int fd = ::open(path.c_str(), O_WRONLY);
+  if (fd < 0) {
+    throw std::runtime_error("clipd: cannot open log to fsync: " + path.string());
+  }
+#if defined(__APPLE__)
+  int rc = ::fcntl(fd, F_FULLFSYNC);
+#else
+  int rc = ::fdatasync(fd);
+#endif
+  if (rc != 0) {
+    ::close(fd);
+    throw std::runtime_error("clipd: failed to fsync log: " + path.string());
+  }
+  if (::close(fd) != 0) {
+    throw std::runtime_error("clipd: failed to close log after fsync: " + path.string());
+  }
+}
+
+// fsync a directory so a rename of one of its entries is itself durable. Plain
+// fsync (not F_FULLFSYNC) is the right call for directory metadata. Throws on
+// failure.
+void fsync_dir(const std::filesystem::path& dir) {
+  int fd = ::open(dir.c_str(), O_RDONLY);
+  if (fd < 0) {
+    throw std::runtime_error("clipd: cannot open log directory to fsync: " +
+                             dir.string());
+  }
+  if (::fsync(fd) != 0) {
+    ::close(fd);
+    throw std::runtime_error("clipd: failed to fsync log directory: " +
+                             dir.string());
+  }
+  if (::close(fd) != 0) {
+    throw std::runtime_error("clipd: failed to close log directory after fsync: " +
+                             dir.string());
+  }
+}
 
 // Little-endian (de)serialization, independent of host byte order.
 void put_u32(std::string& out, uint32_t v) {
@@ -130,8 +176,17 @@ void Log::compact(const std::vector<Entry>& live) {
     }
     f.flush();
   }
+  // Force the temp file's bytes to stable storage BEFORE the rename, so a crash
+  // can never leave a renamed-but-unwritten (empty/partial) log in place.
+  full_fsync_file(tmp);
   // Atomic replace: a crash leaves either the old or the new complete log.
   std::filesystem::rename(tmp, path_);
+  // Persist the rename itself: fsync the containing directory so the new
+  // directory entry survives a crash. parent_path() is empty for a bare
+  // relative filename, where the directory is the current one.
+  std::filesystem::path dir = path_.parent_path();
+  if (dir.empty()) dir = ".";
+  fsync_dir(dir);
 }
 
 uint64_t Log::size_bytes() const {

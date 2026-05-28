@@ -18,6 +18,19 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// Current peak resident set size, in MB. ru_maxrss is a monotonic high-water
+// mark for the whole process, so sampling it right after a size finishes (with
+// sizes run smallest-first) yields that size's true peak.
+double peak_resident_mb() {
+  struct rusage ru{};
+  getrusage(RUSAGE_SELF, &ru);
+#if defined(__APPLE__)
+  return static_cast<double>(ru.ru_maxrss) / (1024.0 * 1024.0);  // bytes
+#else
+  return static_cast<double>(ru.ru_maxrss) / 1024.0;  // kilobytes
+#endif
+}
+
 std::string synthetic_entry(std::mt19937& rng, int i) {
   static const char* words[] = {"alpha",  "beta",   "gamma",  "delta",
                                  "config", "server", "client", "module",
@@ -62,8 +75,8 @@ double bench_one_size(size_t n) {
   double p50 = samples[samples.size() / 2];
   double p99 = samples[(samples.size() * 99) / 100];
 
-  std::printf("  n=%-6zu  mean=%.4f ms  p50=%.4f ms  p99=%.4f ms\n", n, mean,
-              p50, p99);
+  std::printf("  n=%-6zu  mean=%.4f ms  p50=%.4f ms  p99=%.4f ms  peak=%.1f MB\n",
+              n, mean, p50, p99, peak_resident_mb());
   fs::remove(log);
   return mean;
 }
@@ -72,17 +85,9 @@ double bench_one_size(size_t n) {
 
 int main() {
   std::printf("clipd fuzzy-search benchmark (subsequence scan + scoring)\n");
+  // Sizes run smallest-first so the per-size peak= column reflects each size's
+  // own footprint (ru_maxrss is a monotonic high-water mark).
   bench_one_size(10000);
   bench_one_size(50000);
-
-  struct rusage ru{};
-  getrusage(RUSAGE_SELF, &ru);
-  // macOS reports ru_maxrss in bytes; Linux in kilobytes.
-#if defined(__APPLE__)
-  double peak_mb = static_cast<double>(ru.ru_maxrss) / (1024.0 * 1024.0);
-#else
-  double peak_mb = static_cast<double>(ru.ru_maxrss) / 1024.0;
-#endif
-  std::printf("peak resident memory: %.1f MB\n", peak_mb);
   return 0;
 }

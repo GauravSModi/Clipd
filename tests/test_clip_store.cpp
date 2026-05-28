@@ -64,6 +64,15 @@ TEST(ClipStore, DedupBumpProtectsFromEviction) {
   EXPECT_EQ(texts(s), (std::vector<std::string>{"c", "a"}));
 }
 
+TEST(ClipStore, RepeatedInsertsHoldLiveCountAtCap) {
+  ClipStore s(3);
+  for (int i = 0; i < 100; ++i) s.upsert("e" + std::to_string(i), i);
+  // Eviction fires on every over-cap insert, so the live count never exceeds the
+  // cap; only the three most-recent survive, most-recent first.
+  EXPECT_EQ(s.size(), 3u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"e99", "e98", "e97"}));
+}
+
 TEST(ClipStore, SnapshotMatchesRecencyOrder) {
   ClipStore s(10);
   s.upsert("a", 1);

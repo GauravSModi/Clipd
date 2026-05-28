@@ -169,6 +169,51 @@ TEST_F(CoreTest, CompactionPreservesRecencyOrderOnReplay) {
   EXPECT_EQ(texts[2], "oldest");
 }
 
+TEST_F(CoreTest, LoweringCapOnReopenEvictsDownToNewCap) {
+  {
+    Core core(path_, 5, kNoAutoCompact);
+    core.start();
+    core.add("e1", 1);
+    core.add("e2", 2);
+    core.add("e3", 3);
+    core.add("e4", 4);
+    core.add("e5", 5);  // five live entries at cap 5
+  }
+  // Reopen at a SMALLER cap: chronological replay re-applies eviction at the new
+  // cap, so only the two most-recent survive and the older three drop.
+  Core smaller(path_, 2, kNoAutoCompact);
+  smaller.start();
+  EXPECT_EQ(smaller.stats().entry_count, 2u);
+  EXPECT_TRUE(contains(smaller, "e5", 10));
+  EXPECT_TRUE(contains(smaller, "e4", 10));
+  EXPECT_FALSE(contains(smaller, "e3", 10));
+  EXPECT_FALSE(contains(smaller, "e1", 10));
+}
+
+TEST_F(CoreTest, RaisedCapRecoveredEntriesSurviveCompaction) {
+  {
+    Core core(path_, 2, kNoAutoCompact);
+    core.start();
+    core.add("first", 1);
+    core.add("second", 2);
+    core.add("third", 3);  // "first" evicted from store, still in the log
+  }
+  // Raise the cap so "first" is recovered on replay, then compact — rewriting the
+  // log to the recovered live set makes the recovery durable.
+  {
+    Core bigger(path_, 5, kNoAutoCompact);
+    bigger.start();
+    ASSERT_TRUE(contains(bigger, "first", 10));
+    bigger.compact();
+  }
+  // Reopening at the same larger cap still sees all three: compaction persisted
+  // the recovered entry rather than dropping it.
+  Core reopened(path_, 5, kNoAutoCompact);
+  reopened.start();
+  EXPECT_TRUE(contains(reopened, "first", 10));
+  EXPECT_EQ(reopened.stats().entry_count, 3u);
+}
+
 TEST_F(CoreTest, FailedAddLeavesStoreUnchanged) {
   // add() appends to the log before mutating the store, so a failed write
   // leaves the store untouched — the two never disagree mid-session.

@@ -6,11 +6,12 @@ import ClipdKit
 /// Owns the app's lifetime: builds the core pipeline, drives pasteboard polling,
 /// and shows the status item + search panel. Deliberately thin — all history
 /// logic lives in ClipdKit/the C++ core.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusItem: NSStatusItem!
     private var statusMenu: NSMenu!
     private var panel: NSPanel!
     private var pollTimer: Timer?
+    private var suppressAutoDismiss = false
 
     // Held for the process lifetime.
     private var clipboard: Clipboard!
@@ -122,6 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
+        panel.delegate = self
         panel.contentView = NSHostingView(rootView: SearchView(model: model))
         self.panel = panel
     }
@@ -133,14 +135,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showPanel() {
         model.reset()
         panel.center()
+        // Becoming key during activation must not be misread as a focus-loss
+        // dismissal; suppress auto-dismiss until the panel has settled as key.
+        suppressAutoDismiss = true
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async { [weak self] in self?.suppressAutoDismiss = false }
     }
 
     private func hidePanel() {
         panel.orderOut(nil)
         // Relinquish focus so the user's previous app gets the paste.
         NSApp.hide(nil)
+    }
+
+    /// Auto-dismiss when the user interacts with something behind the panel
+    /// (clicks another app, another window, or the desktop). Unlike hidePanel(),
+    /// this does NOT call NSApp.hide: focus has already moved to whatever was
+    /// clicked, and forcing a hide would yank it away.
+    func windowDidResignKey(_ notification: Notification) {
+        guard !suppressAutoDismiss, panel.isVisible else { return }
+        panel.orderOut(nil)
     }
 
     // MARK: - Errors

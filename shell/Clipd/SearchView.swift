@@ -9,6 +9,7 @@ struct SearchView: View {
     @FocusState private var queryFocused: Bool
 
     var body: some View {
+        let now = clipdNowMs()
         VStack(spacing: 0) {
             TextField("Search clipboard history…", text: $model.query)
                 .textFieldStyle(.plain)
@@ -28,12 +29,20 @@ struct SearchView: View {
             } else {
                 List {
                     ForEach(Array(model.results.enumerated()), id: \.offset) { _, match in
-                        Text(match.text)
-                            .lineLimit(2)
-                            .truncationMode(.tail)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                            .onTapGesture { model.choose(match) }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(match.text)
+                                .lineLimit(2)
+                                .truncationMode(.tail)
+                            Text(clipdRelativeTime(fromEpochMs: match.timestamp, nowMs: now))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .help(clipdAbsoluteTime(fromEpochMs: match.timestamp))
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("\(match.text), copied \(clipdAbsoluteTime(fromEpochMs: match.timestamp))")
+                        .onTapGesture { model.choose(match) }
                     }
                 }
                 .listStyle(.plain)

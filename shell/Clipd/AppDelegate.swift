@@ -8,6 +8,7 @@ import ClipdKit
 /// logic lives in ClipdKit/the C++ core.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
+    private var statusMenu: NSMenu!
     private var panel: NSPanel!
     private var pollTimer: Timer?
 
@@ -70,10 +71,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "doc.on.clipboard",
-                                           accessibilityDescription: "Clipd")
-        statusItem.button?.action = #selector(togglePanel)
-        statusItem.button?.target = self
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "doc.on.clipboard",
+                                   accessibilityDescription: "Clipd")
+            button.action = #selector(statusItemClicked)
+            button.target = self
+            // Need right-clicks too, so we can show the menu instead of the panel.
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+
+        statusMenu = NSMenu()
+        statusMenu.addItem(withTitle: "Search Clipd  (⌘⇧V)",
+                           action: #selector(togglePanel), keyEquivalent: "")
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "Quit Clipd",
+                           action: #selector(quit), keyEquivalent: "q")
+        statusMenu.items.forEach { $0.target = self }
+    }
+
+    /// Left-click toggles the search panel; right-click (or control-click) opens
+    /// the menu. We attach the menu only for the duration of the click so the
+    /// button keeps firing its action on a plain left-click.
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        let isRightClick = event?.type == .rightMouseUp
+            || (event?.modifierFlags.contains(.control) ?? false)
+        if isRightClick {
+            statusItem.menu = statusMenu
+            statusItem.button?.performClick(nil)
+            statusItem.menu = nil
+        } else {
+            togglePanel()
+        }
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
     }
 
     // MARK: - Search panel

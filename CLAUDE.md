@@ -10,7 +10,11 @@ shell comes later.
 1. **C++ core** (standalone, CLI-driven) — **DONE**
 2. C API boundary (`extern "C"` lib + flat header) — **DONE**
 3. Swift shell (menu bar, pasteboard polling, hotkey) — **DONE**
-4. Polish (eviction, persistence hardening, README/benchmarks)
+4. Polish (eviction, persistence hardening, README/benchmarks) — **DONE**
+
+**Project complete** — all four phases are done: fsync-durable compaction,
+eviction (FR6) and crash/recovery characterization tests, and a portfolio
+README with real benchmarks plus a recorded recovery demo (`docs/`).
 
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,

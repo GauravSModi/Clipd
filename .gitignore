@@ -7,6 +7,12 @@ cmake-build-*/
 .build/
 .swiftpm/
 
+# Xcode project is generated from project.yml via `xcodegen generate`
+/Clipd.xcodeproj/
+# Xcode user/workspace state
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
 # Local agent / editor config
 .claude/settings.local.json
 

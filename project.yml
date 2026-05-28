@@ -1,0 +1,45 @@
+name: Clipd
+options:
+  bundleIdPrefix: com.clipd
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+
+packages:
+  # The thin Swift shell library (this repo's root SwiftPM package). It links the
+  # CMake-built static archives (libclipd_capi.a + libclipd_core.a + libc++).
+  ClipdKit:
+    path: .
+  # Global hotkey — small third-party lib (PRD: no hand-rolled Carbon).
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: "2.0.0"
+
+targets:
+  Clipd:
+    type: application
+    platform: macOS
+    sources:
+      - path: shell/Clipd
+    dependencies:
+      - package: ClipdKit
+        product: ClipdKit
+      - package: KeyboardShortcuts
+    settings:
+      base:
+        INFOPLIST_FILE: shell/Clipd/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.clipd.Clipd
+        PRODUCT_NAME: Clipd
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "5.0"
+    preBuildScripts:
+      - name: Build clipd C++ core (CMake)
+        basedOnDependencyAnalysis: false
+        script: |
+          export PATH="/opt/homebrew/bin:$PATH"
+          cd "$SRCROOT"
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build

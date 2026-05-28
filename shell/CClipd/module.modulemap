@@ -1,0 +1,7 @@
+// Exposes the flat C API as the Swift-importable module `CClipd`.
+// The header itself stays in include/ (pure C, also consumed by CMake); we only
+// reference it here so include/ isn't polluted with a module map.
+module CClipd {
+    header "../../include/clipd.h"
+    export *
+}

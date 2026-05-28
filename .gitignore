@@ -3,6 +3,10 @@ build/
 build-*/
 cmake-build-*/
 
+# SwiftPM
+.build/
+.swiftpm/
+
 # Local agent / editor config
 .claude/settings.local.json
 

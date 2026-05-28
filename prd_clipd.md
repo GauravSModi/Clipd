@@ -112,6 +112,12 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 5. History persists across restarts (via crash-safe log replay).
 6. Configurable max history size with automatic eviction.
 
+> **Phase 3 amendment (approved 2026-05-27).** Requirements 3 and 4 are merged
+> into a **single unified search panel**, summoned by both the menu-bar icon and
+> the global hotkey. An empty query shows the N most recent entries (the "dropdown"
+> of FR3); typing fuzzy-filters; Enter or a click copies the chosen entry back.
+> One surface satisfies both FR3 and FR4 instead of a separate dropdown + window.
+
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).
 - Recovery correctness: demonstrate clean truncation after a simulated torn write.

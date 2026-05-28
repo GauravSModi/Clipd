@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Pin a min macOS *before* project() so it's injected into the compile flags —
+# the archives the Swift shell links must match its deployment target, else the
+# host-OS default leaks in and the linker warns. This is the app's floor; bump
+# it here and in Package.swift together.
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version")
+endif()
+
 project(clipd LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -45,9 +54,11 @@ clipd_apply_sanitizer(clipd_core)
 # --- C API library ----------------------------------------------------------
 # Flat extern "C" boundary (clipd.h) for the Swift shell. A thin adapter over
 # clipd_core; PUBLIC-links it so consumers (tests, Swift) get the core and its
-# src/ include dir transitively.
+# src/ include dir transitively. The public C header lives in include/ (its own
+# dir, kept clean for use as a Swift bridging/module header).
 add_library(clipd_capi src/c_api.cpp)
 target_link_libraries(clipd_capi PUBLIC clipd_core)
+target_include_directories(clipd_capi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_options(clipd_capi PRIVATE -Wall -Wextra -Wpedantic)
 clipd_apply_sanitizer(clipd_capi)
 
@@ -59,6 +70,9 @@ clipd_apply_sanitizer(clipd-cli)
 # --- Benchmark --------------------------------------------------------------
 add_executable(clipd_bench bench/bench_search.cpp)
 target_link_libraries(clipd_bench PRIVATE clipd_core)
+# Match the core's sanitizer flags so an `--build <sanitizer-dir>` of *all*
+# targets links the sanitizer runtime (clipd_core embeds its ctors/dtors).
+clipd_apply_sanitizer(clipd_bench)
 
 # --- Tests ------------------------------------------------------------------
 enable_testing()

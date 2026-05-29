@@ -22,11 +22,16 @@ public func clipdRelativeTime(fromEpochMs ts: Int64, nowMs: Int64) -> String {
     return "\(days / 7)w ago"
 }
 
-/// Exact copy time for the row tooltip + accessibility label. Locale- and
-/// timezone-dependent, so its exact string is not asserted in tests.
-public func clipdAbsoluteTime(fromEpochMs ts: Int64) -> String {
+// Cached: DateFormatter construction is expensive; reuse one (main-thread UI use).
+private let absoluteFormatter: DateFormatter = {
     let formatter = DateFormatter()
     formatter.dateStyle = .medium
     formatter.timeStyle = .short
-    return formatter.string(from: Date(timeIntervalSince1970: Double(ts) / 1000))
+    return formatter
+}()
+
+/// Exact copy time for the row tooltip + accessibility label. Locale- and
+/// timezone-dependent, so its exact string is not asserted in tests.
+public func clipdAbsoluteTime(fromEpochMs ts: Int64) -> String {
+    absoluteFormatter.string(from: Date(timeIntervalSince1970: Double(ts) / 1000))
 }

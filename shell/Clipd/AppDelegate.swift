@@ -1,17 +1,21 @@
 import AppKit
 import SwiftUI
+import ServiceManagement
 import KeyboardShortcuts
 import ClipdKit
 
 /// Owns the app's lifetime: builds the core pipeline, drives pasteboard polling,
 /// and shows the status item + search panel. Deliberately thin — all history
 /// logic lives in ClipdKit/the C++ core.
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var statusMenu: NSMenu!
+    private var launchAtLoginItem: NSMenuItem!
     private var panel: NSPanel!
     private var pollTimer: Timer?
     private var suppressAutoDismiss = false
+    /// Local monitor for ↑/↓ list navigation while the query field stays focused.
+    private var keyMonitor: Any?
 
     // Held for the process lifetime.
     private var clipboard: Clipboard!
@@ -42,6 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         KeyboardShortcuts.onKeyUp(for: .toggleClipd) { [weak self] in
             self?.togglePanel()
         }
+
+        promptLaunchAtLoginIfFirstRun()
     }
 
     // MARK: - Pipeline
@@ -82,12 +88,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         statusMenu = NSMenu()
+        statusMenu.delegate = self
         statusMenu.addItem(withTitle: "Search Clipd  (⌘⇧V)",
                            action: #selector(togglePanel), keyEquivalent: "")
+        statusMenu.addItem(.separator())
+        launchAtLoginItem = statusMenu.addItem(withTitle: "Launch at Login",
+                                               action: #selector(toggleLaunchAtLogin),
+                                               keyEquivalent: "")
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "Quit Clipd",
                            action: #selector(quit), keyEquivalent: "q")
         statusMenu.items.forEach { $0.target = self }
+    }
+
+    // MARK: - Launch at login
+
+    /// Refresh the checkbox from the real service state each time the menu opens,
+    /// so it never drifts from what the system actually has registered.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        launchAtLoginItem.state = isLaunchAtLoginEnabled ? .on : .off
+    }
+
+    private var isLaunchAtLoginEnabled: Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled {
+                try service.unregister()
+            } else {
+                try service.register()
+            }
+        } catch {
+            NSLog("Clipd: launch-at-login toggle failed: \(error)")
+        }
+        // Re-sync from the real status, so a failed register doesn't desync the UI.
+        launchAtLoginItem.state = isLaunchAtLoginEnabled ? .on : .off
+    }
+
+    /// One-time onboarding: offer to register as a login item on first launch.
+    private func promptLaunchAtLoginIfFirstRun() {
+        let key = "didPromptLaunchAtLogin"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "Launch Clipd at login?"
+            alert.informativeText = "Clipd can start automatically when you log in, so your clipboard history is always being captured."
+            alert.addButton(withTitle: "Launch at Login")
+            alert.addButton(withTitle: "Not Now")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            do { try SMAppService.mainApp.register() }
+            catch { NSLog("Clipd: launch-at-login registration failed: \(error)") }
+        }
     }
 
     /// Left-click toggles the search panel; right-click (or control-click) opens
@@ -140,13 +197,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         suppressAutoDismiss = true
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        installKeyMonitor()
         DispatchQueue.main.async { [weak self] in self?.suppressAutoDismiss = false }
     }
 
     private func hidePanel() {
+        removeKeyMonitor()
         panel.orderOut(nil)
         // Relinquish focus so the user's previous app gets the paste.
         NSApp.hide(nil)
+    }
+
+    /// Arrow ↑/↓ drive list selection while the SwiftUI TextField keeps focus for
+    /// typing (a focused single-line field otherwise swallows the arrows). ⌘1–9,
+    /// Enter, and the digit keys are left for SwiftUI to handle, so we only consume
+    /// the plain arrows. Run-the-app verified.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.panel.isVisible,
+                  !event.modifierFlags.contains(.command) else { return event }
+            switch event.keyCode {
+            case 126: self.model.moveSelection(by: -1); return nil   // up
+            case 125: self.model.moveSelection(by: 1);  return nil   // down
+            default:  return event
+            }
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
     }
 
     /// Auto-dismiss when the user interacts with something behind the panel
@@ -155,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// clicked, and forcing a hide would yank it away.
     func windowDidResignKey(_ notification: Notification) {
         guard !suppressAutoDismiss, panel.isVisible else { return }
+        removeKeyMonitor()
         panel.orderOut(nil)
     }
 

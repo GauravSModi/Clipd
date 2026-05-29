@@ -118,6 +118,62 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > of FR3); typing fuzzy-filters; Enter or a click copies the chosen entry back.
 > One surface satisfies both FR3 and FR4 instead of a separate dropdown + window.
 
+> **Post-v1 shell-enhancement amendment (2026-05-29).** A four-feature UX batch
+> extends the panel beyond the FRs, all **shell-only** (no C++ core, C API,
+> header, or log change):
+> - **Direct paste-back.** The default activation now *pastes* the chosen entry
+>   into the previously focused app (Enter / click), with **copy-back on ⌘↵ /
+>   ⌘-click**. This deliberately shifts the FR3/FR4 "copy back" default to "paste"
+>   while keeping copy available; it requires the macOS Accessibility permission
+>   and falls back to copy-only when that isn't granted.
+> - **Keyboard selection.** ↑/↓ + Enter activate the highlighted row (extending
+>   FR4's "Enter copies top result"), plus ⌘1–9 for the Nth recent.
+> - **Content-type affordances.** A whole-string URL / email / hex color gets an
+>   inline action (open link / compose / color swatch).
+> - **Launch at login** via `SMAppService`, with a first-launch prompt.
+>
+> These are UX extensions, not changes to the storage/search contract.
+
+> **Post-v1 image / file capture amendment (2026-05-29).** Promotes the v1 *non-goal*
+> "Image/file clipboard support" and the Future-Work item "Image/file clipboard
+> support" to **supported features**. This is the first post-v1 change that
+> touches every layer (Entry/identity, log record format, the C API, and the
+> Swift shell), so the storage/search contracts are **extended** here, not
+> bypassed.
+> - **Capture:** images are stored as bytes; files are stored **by reference**
+>   (the path), not by copying contents. Capture priority is text → image → file,
+>   so a copy carrying both text and an image is stored as text.
+> - **Identity:** every entry has a stable `id = sha256-hex(kind_byte ‖ content)`.
+>   The leading kind byte is domain separation so a text and a file with the
+>   same content bytes never collide.
+> - **Storage:** image bytes live in a content-addressed blob store at
+>   `<log_path>.blobs/<id>` (write-once, atomic rename, fsync); the log carries
+>   only small reference records. The log format gains a `"CLPD"`+version header
+>   and per-record type tags (TEXT / IMAGE / FILE; PIN/UNPIN/TOMBSTONE/CLEAR
+>   reserved for the next batch). Pre-amendment header-less text-only logs
+>   replay as TEXT and are migrated to v1 on first start (one compaction).
+> - **Crash safety:** the blob is written and fsync'd **before** the log record
+>   that references it (a crash leaves an orphan blob, never a dangling
+>   reference). On replay, an image record whose blob is gone skips just that
+>   one entry. Orphan blobs are GC'd by compaction, but only **after** the new
+>   log is durably renamed.
+> - **Eviction:** the count cap stays; a new total-byte budget is enforced
+>   alongside it, and an optional per-image cap rejects oversize images at
+>   ingest. A single oversize entry is kept (the most-recent insert is never
+>   evicted away).
+> - **Search:** `FuzzyMatcher` stays pure — it sees a synthesized label
+>   (files match on filename + path; images on a label like `"image 1024x768 png"`).
+> - **C API + memory model:** `ClipdMatch` gains `kind`/`id`/`byte_size`/`width`/
+>   `height` (still one single-arena allocation, freed in one call). Image bytes
+>   are fetched on demand via `clipd_read_blob` + `clipd_free_blob` (its own
+>   single-malloc/single-free buffer) so the search arena stays small.
+>
+> **Limitations to keep framed honestly (not to overclaim away):** referenced
+> files can be moved/deleted between capture and paste-back; image bytes sit in
+> a **plaintext blob store on disk** — worse for sensitive images than the
+> already-plaintext text log. The concealed/transient pasteboard filter is
+> still the floor, not security. Encryption-at-rest remains Future Work.
+
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).
 - Recovery correctness: demonstrate clean truncation after a simulated torn write.
@@ -140,8 +196,7 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 - **Indexed search for scale:** trie or n-gram index to take search sublinear, with a synthetic 1M-entry benchmark demonstrating the naive scan degrading (~30–100ms/keystroke) and the index holding up. Turns the scale limitation into a documented engineering story.
 - **Encryption-at-rest:** encrypt the log so private text isn't stored in plaintext. Concealed-type exclusion is the v1 floor; this is the real fix.
 - **Concurrent compaction:** move compaction off the serial queue onto a background thread, introducing a reader-writer lock. Only needed if data size grows enough that serial-queue compaction causes perceptible stalls.
-- Image/file clipboard support.
-- Pinned/favorite entries.
+- Pinned/favorite entries (next batch on top of the image/file identity model).
 
 ## Portfolio optimization
 - **Torn-write recovery demo:** test harness that kills the process mid-write (or corrupts the log tail directly), then shows recovery truncating to the last valid record. Terminal output or a GIF of this in the README is the single strongest selling point — most clipboard managers don't do crash-safe storage at all.

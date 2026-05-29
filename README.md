@@ -3,9 +3,12 @@
 Fast, local-first clipboard history for macOS. The engineering centerpiece is a
 C++ core: an in-memory store with fuzzy search and a **crash-safe append-only
 storage engine**, exposed over a flat `extern "C"` API and driven by a thin
-Swift menu-bar shell. **Phases 1–3 are complete** — the standalone C++ core
-(also driven by a scriptable CLI harness), the C API boundary, and the macOS
-menu-bar app — with tests, sanitizers, and benchmarks. Phase 4 is polish.
+Swift menu-bar shell. **All four phases are complete** — the standalone C++ core
+(also driven by a scriptable CLI harness), the C API boundary, the macOS
+menu-bar app, and polish (eviction, fsync-durable compaction, a recovery demo) —
+with tests, sanitizers, and benchmarks. A post-v1 shell-enhancement batch
+(direct paste-back, keyboard selection, content-type affordances, and
+launch-at-login) is also shipped.
 
 ## Architecture
 
@@ -27,9 +30,17 @@ that the Swift shell links against:
 A deliberately thin macOS shell over the C API (no dedup, scoring, or storage
 policy of its own — that all lives in the core):
 
-- **Menu-bar status item** (agent app, no Dock icon; right-click → Quit).
-- **Unified search panel** — type to fuzzy-search history, Enter to copy the
-  selection back to the pasteboard.
+- **Menu-bar status item** (agent app, no Dock icon; right-click → Quit, with a
+  **Launch at Login** toggle).
+- **Unified search panel** — type to fuzzy-search history; **↑/↓** move the
+  selection and **Enter pastes it back into the app you were just in** (**⌘↵**
+  copies only); **⌘1–9** grab the Nth most recent.
+- **Direct paste-back** — reactivates the previously focused app and synthesizes
+  ⌘V so the entry lands in the field you were typing in. Needs the macOS
+  Accessibility permission (prompted on first run); falls back to copy-only when
+  it isn't granted.
+- **Content-type affordances** — a snippet that's a whole URL, email, or hex
+  color gets an inline action: open the link, compose an email, or a color swatch.
 - **Global hotkey** ⌘⇧V (via `KeyboardShortcuts`) to summon the panel.
 - **Pasteboard polling** every 0.5 s on a `changeCount` check, with
   **concealed/transient skip** so password-manager (`ConcealedType`) and
@@ -42,9 +53,11 @@ into Swift values and handed straight back to `clipd_free_results`, so no C++
 pointer outlives the call. Idle CPU was measured at ~0% in Phase 3 (the poll
 loop is a single integer `changeCount` comparison twice a second).
 
-The testable, UI-free layer (`ClipdKit`) is a SwiftPM library with 13 XCTest
-cases; the menu-bar app is an Xcode target generated from `project.yml`. See
-[CLAUDE.md](CLAUDE.md) for the exact `swift test` / `xcodebuild` invocations.
+The testable, UI-free layer (`ClipdKit`) is a SwiftPM library with 44 XCTest
+cases — including pure helpers for the content-type classifier, keyboard-selection
+index math, and the paste-vs-copy fallback rule. The menu-bar app is an Xcode
+target generated from `project.yml`. See [CLAUDE.md](CLAUDE.md) for the exact
+`swift test` / `xcodebuild` invocations.
 
 ## Build & test
 
@@ -166,10 +179,21 @@ this scale; an index becomes worthwhile around ~1M entries (see *Limitations*).
 
 ## Limitations (v1, honest framing)
 
-- **Storage is plaintext.** The macOS shell (Phase 3) excludes password-manager
-  `ConcealedType`/`TransientType` clipboard data, but arbitrary private text
-  still lands in a plaintext log. That skip is the floor, **not** security:
-  encryption-at-rest is Future Work, and the store is **not** secure today.
+- **Storage is plaintext — including image blobs.** The macOS shell (Phase 3)
+  excludes password-manager `ConcealedType`/`TransientType` clipboard data, but
+  arbitrary private text still lands in a plaintext log, and image bytes sit in
+  a plaintext content-addressed blob store on disk (`<log>.blobs/<id>`). That
+  filter is the floor, **not** security: encryption-at-rest is Future Work, and
+  the store is **not** secure today.
+- **Files are captured by reference, not by value.** A file copy stores its path
+  only; if the file is moved or deleted before paste-back, the reference points
+  nowhere. Image bytes, by contrast, are captured in full (their pasteboard
+  representation is the bytes themselves).
+- **Capture priority is text → image → file.** A copy carrying both text and an
+  image is stored as text (the more searchable representation). A copy that
+  presents both a file URL and a plain text representation is also stored as
+  text, which can surprise on some apps; Finder ⌘C typically only puts a file
+  URL, which is captured as a file as expected.
 - **Fuzzy matching is ASCII-only.** Case-folding and word-boundary detection
   target ASCII; UTF-8 multibyte sequences are matched byte-for-byte and never
   split, but accent-insensitive / CJK / emoji handling is Future Work.

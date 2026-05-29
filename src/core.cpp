@@ -1,15 +1,18 @@
 #include "core.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 
 #include "fuzzy_matcher.hpp"
+#include "identity.hpp"
+#include "sha256.hpp"
 
 namespace clipd {
 namespace {
 
 // Map an entry's age into a recency factor in (0, 1], 1 == most recent.
-// Monotonic in age; the exact half-life only affects how strongly recency
-// tilts ranking, not ordering.
+// Monotonic in age; the exact half-life only affects how strongly recency tilts
+// ranking, not ordering.
 constexpr float kRecencyHalfLifeMs = 3600000.0f;  // 1 hour
 
 float recency_factor(int64_t timestamp, int64_t now) {
@@ -18,29 +21,122 @@ float recency_factor(int64_t timestamp, int64_t now) {
   return 1.0f / (1.0f + age / kRecencyHalfLifeMs);
 }
 
+std::filesystem::path blob_dir_for(const std::filesystem::path& log_path) {
+  std::filesystem::path dir = log_path;
+  dir += ".blobs";
+  return dir;
+}
+
+// The single source for an image's searchable/display label, used by both
+// add_image and replay so a regenerated label can never drift. The label is
+// derived from metadata, never stored in the log record.
+std::string image_label(uint32_t width, uint32_t height, ImageFormat format) {
+  const char* fmt = (format == ImageFormat::Tiff) ? "tiff" : "png";
+  if (width > 0 && height > 0) {
+    return "image " + std::to_string(width) + "x" + std::to_string(height) + " " +
+           fmt;
+  }
+  return std::string("image ") + fmt;
+}
+
 }  // namespace
 
 Core::Core(std::filesystem::path log_path, size_t max_entries,
-           uint64_t compact_threshold_bytes)
-    : store_(max_entries),
-      log_(std::move(log_path)),
-      compact_threshold_bytes_(compact_threshold_bytes) {}
+           uint64_t compact_threshold_bytes, uint64_t max_bytes,
+           uint64_t max_blob_bytes)
+    : store_(max_entries, max_bytes),
+      log_(log_path),
+      blobs_(blob_dir_for(log_path)),
+      compact_threshold_bytes_(compact_threshold_bytes),
+      max_blob_bytes_(max_blob_bytes) {}
 
 void Core::start() {
   log_.open();
-  // Chronological replay: re-applying upsert in file order reproduces the live
-  // set (including eviction) without resurrecting evicted entries.
-  log_.replay([this](const Entry& e) { store_.upsert(e.text, e.timestamp); });
-  if (log_.size_bytes() > compact_threshold_bytes_) {
+  blobs_.open();
+  const bool legacy = log_.is_legacy();
+
+  // Chronological replay reproduces the live set (including eviction) without
+  // resurrecting evicted entries. The log carries kind + on-disk fields; derive
+  // id/label here (the single identity/label source). An image whose backing
+  // blob is gone is skipped — that one entry only, not a torn-tail truncation.
+  log_.replay([this](const Entry& e) {
+    Entry entry = e;
+    switch (entry.kind) {
+      case Kind::Text:
+        entry.id = content_id(Kind::Text, entry.text);
+        entry.byte_size = entry.text.size();
+        break;
+      case Kind::File:
+        entry.id = content_id(Kind::File, entry.text);
+        entry.byte_size = entry.text.size();
+        break;
+      case Kind::Image:
+        if (!blobs_.exists(entry.id)) return;  // missing blob: skip this entry
+        entry.text = image_label(entry.width, entry.height, entry.image_format);
+        break;
+    }
+    store_.upsert(std::move(entry));
+  });
+
+  // A pre-feature (header-less) log is migrated to v1 by rewriting it; otherwise
+  // compact only when the log has grown past the threshold.
+  if (legacy) {
+    compact();
+  } else if (log_.size_bytes() > compact_threshold_bytes_) {
     compact();
   }
 }
 
 void Core::add(std::string text, int64_t timestamp) {
+  Entry e;
+  e.kind = Kind::Text;
+  e.id = content_id(Kind::Text, text);
+  e.byte_size = text.size();
+  e.timestamp = timestamp;
+  e.text = std::move(text);
   // Durable first: append before mutating the store, so a failed write throws
   // and leaves the store untouched (memory and disk never disagree mid-session).
-  log_.append(Entry{text, timestamp});
-  store_.upsert(std::move(text), timestamp);  // dedup policy lives in the store
+  log_.append(e);
+  store_.upsert(std::move(e));  // dedup policy lives in the store
+}
+
+void Core::add_image(const uint8_t* data, size_t len, uint32_t width,
+                     uint32_t height, ImageFormat format, int64_t timestamp) {
+  // Per-image cap: keep one giant image from dominating the whole byte budget.
+  if (max_blob_bytes_ > 0 && len > max_blob_bytes_) return;
+
+  const std::string id = to_hex(content_digest(Kind::Image, data, len));
+
+  // Blob FIRST: a crash between here and the append leaves an orphan blob
+  // (reclaimed later), never a record pointing at a missing blob.
+  blobs_.put(id, data, len);
+
+  Entry e;
+  e.kind = Kind::Image;
+  e.id = id;
+  e.timestamp = timestamp;
+  e.byte_size = len;
+  e.width = width;
+  e.height = height;
+  e.image_format = format;
+  e.text = image_label(width, height, format);
+  log_.append(e);  // then the referencing record
+  store_.upsert(std::move(e));
+}
+
+void Core::add_file(std::string path, int64_t timestamp) {
+  Entry e;
+  e.kind = Kind::File;
+  e.id = content_id(Kind::File, path);
+  e.byte_size = path.size();
+  e.timestamp = timestamp;
+  e.text = std::move(path);  // for File, text is the path
+  log_.append(e);
+  store_.upsert(std::move(e));
+}
+
+std::optional<std::string> Core::read_blob(const std::string& id) const {
+  return blobs_.get(id);
 }
 
 std::vector<ScoredEntry> Core::search(std::string_view query, size_t max_results,
@@ -69,10 +165,20 @@ void Core::compact() {
   std::vector<Entry> live = store_.snapshot();
   std::reverse(live.begin(), live.end());
   log_.compact(live);
+
+  // GC orphan blobs ONLY after the new log is durably in place (log_.compact has
+  // fsync'd + renamed). Deleting earlier could orphan a blob the still-current
+  // log references; doing it after means a crash mid-GC leaves only
+  // re-collectable orphans, never a dangling reference.
+  std::unordered_set<std::string> live_ids;
+  for (const Entry& e : live) {
+    if (e.kind == Kind::Image) live_ids.insert(e.id);
+  }
+  blobs_.gc(live_ids);
 }
 
 Stats Core::stats() const {
-  return Stats{store_.size(), log_.size_bytes()};
+  return Stats{store_.size(), log_.size_bytes(), store_.total_bytes()};
 }
 
 }  // namespace clipd

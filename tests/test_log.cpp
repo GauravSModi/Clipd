@@ -8,9 +8,12 @@
 #include <string>
 #include <vector>
 
+#include "crc32.hpp"
 #include "entry.hpp"
 
 using clipd::Entry;
+using clipd::ImageFormat;
+using clipd::Kind;
 using clipd::Log;
 namespace fs = std::filesystem;
 
@@ -39,7 +42,36 @@ class LogTest : public ::testing::Test {
     f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
   }
 
+  // Encode a legacy v0 record (no file header, no type tag):
+  //   [u32 length][u32 crc32][i64 timestamp][text]
+  // exactly as Clipd wrote before this feature, so we can prove old logs replay.
+  void append_v0_record(int64_t ts, const std::string& text) {
+    auto put_u32 = [](std::string& out, uint32_t v) {
+      for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+    };
+    std::string payload;
+    auto u = static_cast<uint64_t>(ts);
+    for (int i = 0; i < 8; ++i)
+      payload.push_back(static_cast<char>((u >> (8 * i)) & 0xFF));
+    payload.append(text);
+
+    std::string record;
+    put_u32(record, static_cast<uint32_t>(payload.size()));
+    put_u32(record, clipd::crc32(payload));
+    record.append(payload);
+    append_raw(record);
+  }
+
   uint64_t file_size() const { return fs::file_size(path_); }
+
+  std::string first_bytes(size_t n) const {
+    std::ifstream f(path_, std::ios::binary);
+    std::string out(n, '\0');
+    f.read(out.data(), static_cast<std::streamsize>(n));
+    out.resize(static_cast<size_t>(f.gcount()));
+    return out;
+  }
 
   fs::path path_;
 };
@@ -294,6 +326,195 @@ TEST_F(LogTest, AppendOnUnwritablePathThrows) {
   fs::remove_all(bad.parent_path());
   Log log(bad);
   EXPECT_THROW(log.append({"x", 1}), std::exception);
+}
+
+// --- v1 format: header + typed records -------------------------------------
+
+TEST_F(LogTest, OpenWritesV1HeaderToFreshLog) {
+  Log log(path_);
+  log.open();
+  // The file now begins with the "CLPD" magic so future reads know it is v1.
+  EXPECT_EQ(first_bytes(4), "CLPD");
+  EXPECT_FALSE(log.is_legacy());
+}
+
+TEST_F(LogTest, TextRecordRoundTripsWithKind) {
+  {
+    Log log(path_);
+    log.open();
+    log.append({"hello", 5});
+  }
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].kind, Kind::Text);
+  EXPECT_EQ(entries[0].text, "hello");
+  EXPECT_EQ(entries[0].timestamp, 5);
+}
+
+TEST_F(LogTest, FileRecordRoundTrips) {
+  Entry file;
+  file.kind = Kind::File;
+  file.text = "/Users/me/report.pdf";  // for File, text is the path
+  file.timestamp = 9;
+  {
+    Log log(path_);
+    log.open();
+    log.append(file);
+  }
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].kind, Kind::File);
+  EXPECT_EQ(entries[0].text, "/Users/me/report.pdf");
+  EXPECT_EQ(entries[0].timestamp, 9);
+}
+
+TEST_F(LogTest, ImageRecordRoundTripsMetadata) {
+  Entry img;
+  img.kind = Kind::Image;
+  img.id = std::string(64, 'a');  // a 64-hex-char blob id
+  img.timestamp = 42;
+  img.byte_size = 123456;
+  img.width = 1024;
+  img.height = 768;
+  img.image_format = ImageFormat::Tiff;
+  // text (label) is intentionally left empty — the log stores metadata, not the
+  // derived label.
+  {
+    Log log(path_);
+    log.open();
+    log.append(img);
+  }
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].kind, Kind::Image);
+  EXPECT_EQ(entries[0].id, std::string(64, 'a'));
+  EXPECT_EQ(entries[0].timestamp, 42);
+  EXPECT_EQ(entries[0].byte_size, 123456u);
+  EXPECT_EQ(entries[0].width, 1024u);
+  EXPECT_EQ(entries[0].height, 768u);
+  EXPECT_EQ(entries[0].image_format, ImageFormat::Tiff);
+}
+
+TEST_F(LogTest, MixedKindsRoundTripInOrder) {
+  Entry img;
+  img.kind = Kind::Image;
+  img.id = std::string(64, 'b');
+  img.timestamp = 2;
+  img.byte_size = 99;
+  img.width = 10;
+  img.height = 20;
+  Entry file;
+  file.kind = Kind::File;
+  file.text = "/tmp/x";
+  file.timestamp = 3;
+  {
+    Log log(path_);
+    log.open();
+    log.append({"txt", 1});
+    log.append(img);
+    log.append(file);
+  }
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 3u);
+  EXPECT_EQ(entries[0].kind, Kind::Text);
+  EXPECT_EQ(entries[1].kind, Kind::Image);
+  EXPECT_EQ(entries[1].id, std::string(64, 'b'));
+  EXPECT_EQ(entries[2].kind, Kind::File);
+  EXPECT_EQ(entries[2].text, "/tmp/x");
+}
+
+TEST_F(LogTest, TornTailAfterImageRecordIsTruncated) {
+  Entry img;
+  img.kind = Kind::Image;
+  img.id = std::string(64, 'c');
+  img.timestamp = 1;
+  img.byte_size = 7;
+  img.width = 4;
+  img.height = 4;
+  {
+    Log log(path_);
+    log.open();
+    log.append({"keep", 1});
+    log.append(img);
+  }
+  uint64_t valid_size = file_size();
+  append_raw(std::string("\x40\x00\x00\x00", 4));  // length=64, no payload
+  append_raw("junk");
+
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 2u);
+  EXPECT_EQ(entries[1].kind, Kind::Image);
+  EXPECT_EQ(file_size(), valid_size);  // torn tail truncated, header + 2 records kept
+}
+
+// --- legacy v0 logs: detection, replay, migration --------------------------
+
+TEST_F(LogTest, LegacyV0LogIsDetected) {
+  append_v0_record(1, "old1");
+  append_v0_record(2, "old2");
+  Log log(path_);
+  EXPECT_TRUE(log.is_legacy());
+}
+
+TEST_F(LogTest, LegacyV0LogReplaysAsTextEntries) {
+  append_v0_record(1, "old1");
+  append_v0_record(2, "old2");
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 2u);
+  EXPECT_EQ(entries[0].kind, Kind::Text);
+  EXPECT_EQ(entries[0].text, "old1");
+  EXPECT_EQ(entries[0].timestamp, 1);
+  EXPECT_EQ(entries[1].text, "old2");
+}
+
+TEST_F(LogTest, LegacyV0TornTailStillTruncates) {
+  append_v0_record(1, "good");
+  uint64_t valid_size = file_size();
+  append_raw(std::string("\x20\x00\x00\x00", 4));  // length=32, no payload
+  append_raw("garbage");
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 1u);
+  EXPECT_EQ(entries[0].text, "good");
+  EXPECT_EQ(file_size(), valid_size);
+}
+
+TEST_F(LogTest, CompactWritesV1Header) {
+  {
+    Log log(path_);
+    log.open();
+    log.append({"x", 1});
+  }
+  {
+    Log log(path_);
+    log.compact({{"only", 5}});
+  }
+  EXPECT_EQ(first_bytes(4), "CLPD");
+  Log log(path_);
+  EXPECT_FALSE(log.is_legacy());
+}
+
+TEST_F(LogTest, CompactingALegacyLogMigratesItToV1) {
+  // The migration building block: a v0 log can be rewritten to v1 by compacting
+  // its replayed contents, after which it is no longer legacy and replays.
+  append_v0_record(1, "old1");
+  append_v0_record(2, "old2");
+
+  std::vector<Entry> live;
+  {
+    Log log(path_);
+    log.replay([&](const Entry& e) { live.push_back(e); });
+  }
+  {
+    Log log(path_);
+    log.compact(live);
+  }
+  EXPECT_EQ(first_bytes(4), "CLPD");
+  Log log(path_);
+  EXPECT_FALSE(log.is_legacy());
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 2u);
+  EXPECT_EQ(entries[0].text, "old1");
+  EXPECT_EQ(entries[1].text, "old2");
 }
 
 }  // namespace

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ClipdKit
 
@@ -11,7 +12,10 @@ final class SearchModel: ObservableObject {
     /// Enter on a fresh panel still takes the top result.
     @Published var selectedIndex = 0
 
-    private let controller: HistoryController
+    let controller: HistoryController
+    /// Image thumbnails keyed by blob id. ImageIO downsamples on first access; the
+    /// cache survives across redraws so we don't re-decode every keystroke.
+    private var thumbnailCache: [String: NSImage] = [:]
 
     /// Called when an entry is activated with the requested action (paste vs
     /// copy). The app layer owns the paste mechanics (prior-app reactivation,
@@ -54,5 +58,18 @@ final class SearchModel: ObservableObject {
 
     func choose(_ match: Match, _ action: ClipdPasteAction = .paste) {
         onActivate?(match, action)
+    }
+
+    /// A bounded thumbnail for an image match, or nil for other kinds / missing
+    /// blob / decode failure.
+    func thumbnail(for match: Match, maxPixel: Int = 64) -> NSImage? {
+        guard match.kind == .image else { return nil }
+        if let cached = thumbnailCache[match.id] { return cached }
+        guard let data = controller.readBlob(id: match.id),
+              let image = clipdThumbnail(from: data, maxPixel: maxPixel) else {
+            return nil
+        }
+        thumbnailCache[match.id] = image
+        return image
     }
 }

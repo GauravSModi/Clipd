@@ -5,13 +5,16 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "core.hpp"
+#include "entry.hpp"
 #include "log.hpp"
 
 namespace {
@@ -25,14 +28,36 @@ int64_t now_ms() {
       .count();
 }
 
+const char* kind_str(clipd::Kind kind) {
+  switch (kind) {
+    case clipd::Kind::Image:
+      return "image";
+    case clipd::Kind::File:
+      return "file";
+    case clipd::Kind::Text:
+    default:
+      return "text";
+  }
+}
+
+std::string read_file_bytes(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+}
+
 [[noreturn]] void usage() {
   std::cerr <<
       "usage: clipd-cli --log <path> <command> [args]\n"
-      "  add \"<text>\"                 capture a copy\n"
+      "  add \"<text>\"                 capture a text copy\n"
+      "  add-file <path>               capture a file copy (by reference)\n"
+      "  add-image <path> [--width N] [--height N] [--format png|tiff]\n"
+      "                                capture a file's bytes as an image\n"
+      "  read-blob <id>                write a blob's bytes to stdout\n"
       "  search \"<query>\" [--max N] [--now <ms>]\n"
       "  list [--max N]                show N most-recent entries\n"
       "  compact                       rewrite the log to the live set\n"
-      "  stats                         entry count and log size\n"
+      "  stats                         entry count, log size, store bytes\n"
       "  replay                        validate the log, report any truncation\n";
   std::exit(2);
 }
@@ -52,8 +77,8 @@ std::optional<std::string> take_flag(std::vector<std::string>& args,
 
 void print_results(const std::vector<clipd::ScoredEntry>& results) {
   for (const auto& r : results) {
-    std::cout << r.entry.timestamp << '\t' << r.score << '\t' << r.entry.text
-              << '\n';
+    std::cout << r.entry.timestamp << '\t' << kind_str(r.entry.kind) << '\t'
+              << r.entry.id << '\t' << r.score << '\t' << r.entry.text << '\n';
   }
 }
 
@@ -74,6 +99,42 @@ int main(int argc, char** argv) {
     if (args.empty()) usage();
     core.start();
     core.add(args[0], now_ms());
+    return 0;
+  }
+
+  if (command == "add-file") {
+    if (args.empty()) usage();
+    core.start();
+    core.add_file(args[0], now_ms());
+    return 0;
+  }
+
+  if (command == "add-image") {
+    auto width = take_flag(args, "--width");
+    auto height = take_flag(args, "--height");
+    auto format = take_flag(args, "--format");
+    if (args.empty()) usage();
+    std::string bytes = read_file_bytes(args[0]);
+    clipd::ImageFormat fmt = (format && *format == "tiff")
+                                 ? clipd::ImageFormat::Tiff
+                                 : clipd::ImageFormat::Png;
+    core.start();
+    core.add_image(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
+                   width ? static_cast<uint32_t>(std::stoul(*width)) : 0,
+                   height ? static_cast<uint32_t>(std::stoul(*height)) : 0, fmt,
+                   now_ms());
+    return 0;
+  }
+
+  if (command == "read-blob") {
+    if (args.empty()) usage();
+    core.start();
+    auto bytes = core.read_blob(args[0]);
+    if (!bytes) {
+      std::cerr << "no blob for id: " << args[0] << '\n';
+      return 1;
+    }
+    std::cout.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
     return 0;
   }
 
@@ -108,7 +169,7 @@ int main(int argc, char** argv) {
     core.start();
     auto s = core.stats();
     std::cout << "entries: " << s.entry_count << "\nlog_bytes: " << s.log_bytes
-              << '\n';
+              << "\nstore_bytes: " << s.store_bytes << '\n';
     return 0;
   }
 

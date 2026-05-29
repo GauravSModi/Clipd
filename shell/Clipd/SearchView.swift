@@ -69,6 +69,8 @@ struct SearchView: View {
 
     private func row(_ match: Match, now: Int64) -> some View {
         HStack(alignment: .top, spacing: 8) {
+            leading(match)
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(match.text)
                     .lineLimit(2)
@@ -79,11 +81,40 @@ struct SearchView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            affordance(for: match.text)
+            // URL/email/hex affordances are only meaningful for text entries.
+            if match.kind == .text {
+                affordance(for: match.text)
+            }
         }
         .help(clipdAbsoluteTime(fromEpochMs: match.timestamp))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(match.text), copied \(clipdAbsoluteTime(fromEpochMs: match.timestamp))")
+    }
+
+    /// A leading icon per kind: an ImageIO-downsampled thumbnail for images, the
+    /// system file icon for files, nothing for text.
+    @ViewBuilder
+    private func leading(_ match: Match) -> some View {
+        switch match.kind {
+        case .image:
+            if let thumb = model.thumbnail(for: match) {
+                Image(nsImage: thumb)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 40, height: 40)
+            } else {
+                Image(systemName: "photo")
+                    .frame(width: 40, height: 40)
+                    .foregroundStyle(.secondary)
+            }
+        case .file:
+            Image(nsImage: NSWorkspace.shared.icon(forFile: match.text))
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 40, height: 40)
+        case .text:
+            EmptyView()
+        }
     }
 
     /// A trailing affordance for the detected content type. The Buttons are their

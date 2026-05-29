@@ -36,7 +36,7 @@ class CApiTest : public ::testing::Test {
 };
 
 TEST_F(CApiTest, CreateReturnsHandleAndDestroyIsNullSafe) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
   clipd_destroy(core);
   clipd_destroy(nullptr);  // must be a safe no-op
@@ -50,11 +50,11 @@ TEST_F(CApiTest, CreateOnUnwritablePathReturnsNull) {
                   std::to_string(reinterpret_cast<uintptr_t>(this))) /
                  "log";
   fs::remove_all(bad.parent_path());
-  EXPECT_EQ(clipd_create(bad.string().c_str(), 100, kNoAutoCompact), nullptr);
+  EXPECT_EQ(clipd_create(bad.string().c_str(), 100, kNoAutoCompact, 0, 0), nullptr);
 }
 
 TEST_F(CApiTest, AddThenSearchReturnsScoredMatch) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
 
   ASSERT_EQ(clipd_add(core, "hello world", 1), 0);
@@ -72,7 +72,7 @@ TEST_F(CApiTest, AddThenSearchReturnsScoredMatch) {
 }
 
 TEST_F(CApiTest, SearchNoMatchReturnsEmptyNonNull) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
   ASSERT_EQ(clipd_add(core, "apple", 1), 0);
 
@@ -91,7 +91,7 @@ TEST_F(CApiTest, SearchFailureReturnsNull) {
 }
 
 TEST_F(CApiTest, EmptyQueryReturnsRecentEntries) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
   ASSERT_EQ(clipd_add(core, "first", 1), 0);
   ASSERT_EQ(clipd_add(core, "second", 2), 0);
@@ -104,7 +104,7 @@ TEST_F(CApiTest, EmptyQueryReturnsRecentEntries) {
 }
 
 TEST_F(CApiTest, SearchRespectsMaxResults) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
   ASSERT_EQ(clipd_add(core, "cat1", 1), 0);
   ASSERT_EQ(clipd_add(core, "cat2", 2), 0);
@@ -118,7 +118,7 @@ TEST_F(CApiTest, SearchRespectsMaxResults) {
 }
 
 TEST_F(CApiTest, RecencyReferenceFlowsThroughNow) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
   // Equal match quality for query "x"; only recency differs, so now_ms must
   // tilt the ranking to the more recent entry.
@@ -140,13 +140,13 @@ TEST_F(CApiTest, FreeResultsOnNullIsNoOp) {
 
 TEST_F(CApiTest, PersistsAcrossReopen) {
   {
-    ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+    ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
     ASSERT_NE(core, nullptr);
     ASSERT_EQ(clipd_add(core, "persisted", 1), 0);
     ASSERT_EQ(clipd_add(core, "alsohere", 2), 0);
     clipd_destroy(core);
   }
-  ClipdCore* reopened = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* reopened = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(reopened, nullptr);
   ClipdResults* r = clipd_search(reopened, "", 10, 100);
   ASSERT_NE(r, nullptr);
@@ -156,7 +156,7 @@ TEST_F(CApiTest, PersistsAcrossReopen) {
 }
 
 TEST_F(CApiTest, StatsReportsEntryCountAndLogGrowth) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
 
   ClipdStats s0{};
@@ -177,14 +177,14 @@ TEST_F(CApiTest, StatsReportsEntryCountAndLogGrowth) {
 TEST_F(CApiTest, StatsOnNullArgsFails) {
   ClipdStats s{};
   EXPECT_NE(clipd_stats(nullptr, &s), 0);  // NULL handle → failure
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
   EXPECT_NE(clipd_stats(core, nullptr), 0);  // NULL out → failure
   clipd_destroy(core);
 }
 
 TEST_F(CApiTest, CompactShrinksLogAfterDedup) {
-  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact);
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
   ASSERT_NE(core, nullptr);
   // Re-copy the same text repeatedly: dedup keeps one live entry, but each copy
   // is appended, so superseded records accumulate until compaction.
@@ -205,6 +205,113 @@ TEST_F(CApiTest, PureCClientCompilesAndRuns) {
   // The C client (tests/c_smoke.c) adds three entries and searches "alpha",
   // which matches "alpha one" and "alpha three" but not "beta two".
   EXPECT_EQ(clipd_c_smoke(log_path().c_str()), 2);
+}
+
+// --- images, files, and the richer ClipdMatch ------------------------------
+
+TEST_F(CApiTest, TextMatchHasTextKindAndId) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "hello", 1), 0);
+
+  ClipdResults* r = clipd_search(core, "hello", 10, 100);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  EXPECT_EQ(r->matches[0].kind, CLIPD_TEXT);
+  ASSERT_NE(r->matches[0].id, nullptr);
+  EXPECT_EQ(std::string(r->matches[0].id).size(), 64u);  // sha256-hex
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, AddImageSearchResultCarriesKindDimsAndId) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  const std::string png = "\x89PNG\r\n\x1a\nIMAGEBYTES";
+  ASSERT_EQ(clipd_add_image(core, reinterpret_cast<const uint8_t*>(png.data()),
+                            png.size(), 1024, 768, CLIPD_IMAGE_PNG, 1),
+            0);
+
+  ClipdResults* r = clipd_search(core, "image", 10, 100);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  EXPECT_EQ(r->matches[0].kind, CLIPD_IMAGE);
+  EXPECT_EQ(r->matches[0].width, 1024u);
+  EXPECT_EQ(r->matches[0].height, 768u);
+  EXPECT_EQ(r->matches[0].byte_size, png.size());
+  ASSERT_NE(r->matches[0].id, nullptr);
+  EXPECT_EQ(std::string(r->matches[0].id).size(), 64u);
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, ReadBlobRoundTripsImageBytes) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  const std::string png("\x00\x01\x02\xffRAW", 7);  // embedded NUL + high byte
+  ASSERT_EQ(clipd_add_image(core, reinterpret_cast<const uint8_t*>(png.data()),
+                            png.size(), 2, 2, CLIPD_IMAGE_PNG, 1),
+            0);
+
+  ClipdResults* r = clipd_search(core, "", 10, 100);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  std::string id = r->matches[0].id;
+  clipd_free_results(r);
+
+  size_t len = 0;
+  const uint8_t* bytes = clipd_read_blob(core, id.c_str(), &len);
+  ASSERT_NE(bytes, nullptr);
+  ASSERT_EQ(len, png.size());
+  EXPECT_EQ(std::string(reinterpret_cast<const char*>(bytes), len), png);
+  clipd_free_blob(bytes);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, ReadBlobUnknownIdReturnsNull) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  size_t len = 123;
+  EXPECT_EQ(clipd_read_blob(core, std::string(64, 'a').c_str(), &len), nullptr);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, AddFileResultIsFileKindWithPath) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add_file(core, "/Users/me/notes.txt", 1), 0);
+
+  ClipdResults* r = clipd_search(core, "notes", 10, 100);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  EXPECT_EQ(r->matches[0].kind, CLIPD_FILE);
+  EXPECT_STREQ(r->matches[0].text, "/Users/me/notes.txt");
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, ImageFileBlobNullArgsAreSafe) {
+  EXPECT_NE(clipd_add_image(nullptr, nullptr, 0, 0, 0, CLIPD_IMAGE_PNG, 0), 0);
+  EXPECT_NE(clipd_add_file(nullptr, "x", 0), 0);
+  size_t len = 0;
+  EXPECT_EQ(clipd_read_blob(nullptr, "id", &len), nullptr);
+  clipd_free_blob(nullptr);  // safe no-op
+
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  EXPECT_NE(clipd_add_image(core, nullptr, 0, 1, 1, CLIPD_IMAGE_PNG, 0), 0);
+  EXPECT_NE(clipd_add_file(core, nullptr, 0), 0);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, StatsReportsStoreBytes) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "abcde", 1), 0);  // 5 bytes
+  ClipdStats s{};
+  ASSERT_EQ(clipd_stats(core, &s), 0);
+  EXPECT_EQ(s.store_bytes, 5u);
+  clipd_destroy(core);
 }
 
 }  // namespace

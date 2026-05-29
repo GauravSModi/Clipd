@@ -28,7 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var model: SearchModel!
 
     private let maxEntries = 10_000
-    private let compactThresholdBytes: UInt64 = 4 * 1024 * 1024  // 4 MB
+    private let compactThresholdBytes: UInt64 = 4 * 1024 * 1024     // 4 MB
+    /// Total live byte budget (sum of Entry.byte_size). Images are MB-scale, so
+    /// an unbounded byte budget would let a few large copies fill the disk.
+    private let maxBytes: UInt64 = 256 * 1024 * 1024                // 256 MB
+    /// Per-image cap so a single huge TIFF can't dominate the whole budget.
+    private let maxBlobBytes: UInt64 = 50 * 1024 * 1024             // 50 MB
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let clipboard = makeClipboard() else {
@@ -70,7 +75,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let logPath = dir.appendingPathComponent("clipd.log").path
         return try? Clipboard(logPath: logPath,
                               maxEntries: maxEntries,
-                              compactThresholdBytes: compactThresholdBytes)
+                              compactThresholdBytes: compactThresholdBytes,
+                              maxBytes: maxBytes,
+                              maxBlobBytes: maxBlobBytes)
     }
 
     private func startPolling() {
@@ -243,12 +250,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - Paste-back
 
     /// Resolve the requested action against the Accessibility permission (paste
-    /// degrades to copy when not granted), put the entry on the pasteboard, then
-    /// either hand focus back for a manual paste (copy) or paste it in (paste).
+    /// degrades to copy when not granted), put the entry on the pasteboard under
+    /// the type its kind dictates, then either hand focus back for a manual paste
+    /// (copy) or paste it in (paste).
     private func activate(_ match: Match, requested: ClipdPasteAction) {
         let action = clipdResolvePasteAction(requested: requested,
                                              accessibilityTrusted: AXIsProcessTrusted())
-        SystemClipboardWriter.write(match.text)
+        switch match.kind {
+        case .text:
+            SystemClipboardWriter.write(match.text)
+        case .image:
+            guard let data = controller.readBlob(id: match.id) else {
+                // Blob missing (manually deleted, etc.): dismiss without
+                // overwriting the user's current pasteboard contents.
+                hidePanel()
+                return
+            }
+            SystemClipboardWriter.writeImage(data, format: clipdImageFormat(of: data))
+        case .file:
+            SystemClipboardWriter.writeFile(match.text)  // for File, text == path
+        }
         switch action {
         case .copy:  hidePanel()
         case .paste: pasteBack()

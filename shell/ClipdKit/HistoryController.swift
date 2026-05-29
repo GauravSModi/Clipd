@@ -19,8 +19,8 @@ public final class HistoryController {
         self.monitor = monitor
         self.compactThresholdBytes = compactThresholdBytes
         self.now = now
-        monitor.onCopy = { [weak self] text, timestamp in
-            self?.ingest(text, at: timestamp)
+        monitor.onCapture = { [weak self] capture, timestamp in
+            self?.ingest(capture, at: timestamp)
         }
     }
 
@@ -30,11 +30,25 @@ public final class HistoryController {
         try clipboard.search(query, maxResults: maxResults, now: now())
     }
 
-    private func ingest(_ text: String, at timestamp: Int64) {
-        // A failed write leaves the store unchanged (the core makes add atomic);
-        // we don't crash the app over one dropped copy.
+    /// The bytes of an image entry's blob (for thumbnails / paste-back), or nil.
+    public func readBlob(id: String) -> Data? {
+        clipboard.readBlob(id: id)
+    }
+
+    private func ingest(_ capture: Capture, at timestamp: Int64) {
+        // A failed write leaves the store unchanged (the core makes each add
+        // atomic); we don't crash the app over one dropped copy.
         do {
-            try clipboard.add(text, at: timestamp)
+            switch capture {
+            case .text(let text):
+                try clipboard.add(text, at: timestamp)
+            case .image(let image):
+                try clipboard.addImage(image.data, width: image.width,
+                                       height: image.height, format: image.format,
+                                       at: timestamp)
+            case .file(let path):
+                try clipboard.addFile(path, at: timestamp)
+            }
             try compactIfNeeded()
         } catch {
             // Best-effort capture; a dropped copy or skipped compaction is not fatal.

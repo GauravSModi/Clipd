@@ -8,6 +8,8 @@ private final class FakePasteboard: PasteboardReading {
     var types: [String] = []
     var content: String?
     func string() -> String? { content }
+    func imageCapture() -> ImageCapture? { nil }
+    func fileURLPath() -> String? { nil }
     func write(_ text: String, types: [String] = ["public.utf8-plain-text"]) {
         content = text; self.types = types; changeCount += 1
     }

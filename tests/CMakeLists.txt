@@ -11,6 +11,9 @@ FetchContent_MakeAvailable(googletest)
 # Test sources are added as each unit is built (TDD, one unit at a time).
 add_executable(clipd_tests
   test_crc32.cpp
+  test_sha256.cpp
+  test_identity.cpp
+  test_blob_store.cpp
   test_clip_store.cpp
   test_fuzzy_matcher.cpp
   test_log.cpp

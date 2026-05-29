@@ -17,7 +17,7 @@ int clipd_c_smoke(const char* log_path) {
   ClipdResults* results;
   int count;
 
-  core = clipd_create(log_path, 100, (uint64_t)1 << 40);
+  core = clipd_create(log_path, 100, (uint64_t)1 << 40, 0, 0);
   if (core == NULL) {
     return -1;
   }

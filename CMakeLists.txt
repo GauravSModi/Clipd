@@ -42,6 +42,10 @@ endfunction()
 # Sources are added as each unit is built (TDD, one unit at a time).
 add_library(clipd_core
   src/crc32.cpp
+  src/sha256.cpp
+  src/identity.cpp
+  src/durable_file.cpp
+  src/blob_store.cpp
   src/clip_store.cpp
   src/fuzzy_matcher.cpp
   src/log.cpp

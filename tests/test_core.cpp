@@ -4,10 +4,17 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "entry.hpp"
+#include "identity.hpp"
+
 using clipd::Core;
+using clipd::ImageFormat;
+using clipd::Kind;
 using clipd::ScoredEntry;
 namespace fs = std::filesystem;
 
@@ -34,6 +41,59 @@ class CoreTest : public ::testing::Test {
   bool contains(const Core& core, const std::string& text, int64_t now) {
     auto v = all_texts(core, now);
     return std::find(v.begin(), v.end(), text) != v.end();
+  }
+
+  // Capture a string as image bytes (the bytes are opaque to the core).
+  void add_image(Core& core, const std::string& bytes, uint32_t w, uint32_t h,
+                 ImageFormat fmt, int64_t ts) {
+    core.add_image(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), w,
+                   h, fmt, ts);
+  }
+
+  std::optional<ScoredEntry> find_by_id(const Core& core, const std::string& id,
+                                        int64_t now) {
+    for (const auto& s : core.search("", 1000, now)) {
+      if (s.entry.id == id) return s;
+    }
+    return std::nullopt;
+  }
+
+  // Write a legacy v0 log (no header, untagged [i64 ts][text] records) directly,
+  // so we can prove start() migrates an existing pre-feature log.
+  void write_v0_log(const std::vector<std::pair<int64_t, std::string>>& records) {
+    auto put_u32 = [](std::string& out, uint32_t v) {
+      for (int i = 0; i < 4; ++i)
+        out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+    };
+    auto crc = [](const std::string& s) {
+      uint32_t c = 0xFFFFFFFFu;
+      for (unsigned char b : s) {
+        c ^= b;
+        for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+      }
+      return c ^ 0xFFFFFFFFu;
+    };
+    std::ofstream f(path_, std::ios::binary | std::ios::trunc);
+    for (const auto& [ts, text] : records) {
+      std::string payload;
+      auto u = static_cast<uint64_t>(ts);
+      for (int i = 0; i < 8; ++i)
+        payload.push_back(static_cast<char>((u >> (8 * i)) & 0xFF));
+      payload.append(text);
+      std::string rec;
+      put_u32(rec, static_cast<uint32_t>(payload.size()));
+      put_u32(rec, crc(payload));
+      rec.append(payload);
+      f.write(rec.data(), static_cast<std::streamsize>(rec.size()));
+    }
+  }
+
+  std::string first_bytes(size_t n) const {
+    std::ifstream f(path_, std::ios::binary);
+    std::string out(n, '\0');
+    f.read(out.data(), static_cast<std::streamsize>(n));
+    out.resize(static_cast<size_t>(f.gcount()));
+    return out;
   }
 
   fs::path path_;
@@ -231,6 +291,152 @@ TEST_F(CoreTest, FailedAddLeavesStoreUnchanged) {
   fs::remove_all(dir);  // log's parent is gone: the next append must fail
   EXPECT_THROW(core.add("dropped", 2), std::exception);
   EXPECT_EQ(core.stats().entry_count, 1u);  // store not mutated by a failed add
+}
+
+// --- images and files ------------------------------------------------------
+
+TEST_F(CoreTest, AddImageIsStoredAndSearchableByLabel) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  add_image(core, "PNGBYTES", 1024, 768, ImageFormat::Png, 1);
+
+  auto byword = core.search("image", 10, 10);
+  ASSERT_EQ(byword.size(), 1u);
+  EXPECT_EQ(byword[0].entry.kind, Kind::Image);
+  EXPECT_EQ(byword[0].entry.width, 1024u);
+  EXPECT_EQ(byword[0].entry.height, 768u);
+  // The synthesized label carries the dimensions, so they are searchable too.
+  EXPECT_FALSE(core.search("1024", 10, 10).empty());
+}
+
+TEST_F(CoreTest, AddImageDedupsIdenticalBytes) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  add_image(core, "SAMEBYTES", 10, 10, ImageFormat::Png, 1);
+  add_image(core, "SAMEBYTES", 10, 10, ImageFormat::Png, 5);  // re-copy
+  EXPECT_EQ(core.stats().entry_count, 1u);
+  // Recency bumped to the later timestamp.
+  std::string id = clipd::content_id(Kind::Image, "SAMEBYTES");
+  auto found = find_by_id(core, id, 10);
+  ASSERT_TRUE(found.has_value());
+  EXPECT_EQ(found->entry.timestamp, 5);
+}
+
+TEST_F(CoreTest, ReadBlobReturnsTheImageBytes) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  add_image(core, "RAWIMAGE", 4, 4, ImageFormat::Tiff, 1);
+  std::string id = clipd::content_id(Kind::Image, "RAWIMAGE");
+  auto bytes = core.read_blob(id);
+  ASSERT_TRUE(bytes.has_value());
+  EXPECT_EQ(*bytes, "RAWIMAGE");
+}
+
+TEST_F(CoreTest, AddFileStoresPathAndIsSearchableByName) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add_file("/Users/me/report.pdf", 1);
+
+  auto byname = core.search("report", 10, 10);
+  ASSERT_EQ(byname.size(), 1u);
+  EXPECT_EQ(byname[0].entry.kind, Kind::File);
+  EXPECT_EQ(byname[0].entry.text, "/Users/me/report.pdf");
+}
+
+TEST_F(CoreTest, ImageAndFilePersistAcrossRestart) {
+  std::string img_id = clipd::content_id(Kind::Image, "IMGDATA");
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    add_image(core, "IMGDATA", 8, 8, ImageFormat::Png, 1);
+    core.add_file("/tmp/a.txt", 2);
+  }
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  EXPECT_TRUE(find_by_id(reopened, img_id, 10).has_value());
+  EXPECT_TRUE(contains(reopened, "/tmp/a.txt", 10));
+  EXPECT_EQ(*reopened.read_blob(img_id), "IMGDATA");
+}
+
+TEST_F(CoreTest, MissingBlobIsSkippedOnReplayKeepingOtherEntries) {
+  std::string img_id = clipd::content_id(Kind::Image, "GONE");
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    core.add("keepme", 1);
+    add_image(core, "GONE", 2, 2, ImageFormat::Png, 2);
+  }
+  // Simulate the backing blob disappearing (e.g. manual deletion / partial copy).
+  fs::path blob_dir = path_;
+  blob_dir += ".blobs";
+  fs::remove(blob_dir / img_id);
+
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  // The CRC-valid image record replays but its blob is gone, so that one entry
+  // is skipped — the rest of the log replays normally (not a torn-tail wipe).
+  EXPECT_FALSE(find_by_id(reopened, img_id, 10).has_value());
+  EXPECT_TRUE(contains(reopened, "keepme", 10));
+  EXPECT_EQ(reopened.stats().entry_count, 1u);
+}
+
+TEST_F(CoreTest, CompactionGarbageCollectsOrphanBlobsKeepsReferenced) {
+  std::string id_a = clipd::content_id(Kind::Image, "AAAA");
+  std::string id_b = clipd::content_id(Kind::Image, "BBBB");
+  Core core(path_, /*max_entries=*/1, kNoAutoCompact);  // cap 1 forces eviction
+  core.start();
+  add_image(core, "AAAA", 1, 1, ImageFormat::Png, 1);
+  add_image(core, "BBBB", 1, 1, ImageFormat::Png, 2);  // evicts A from the store
+
+  // A is evicted from the live set but its blob is still on disk pre-GC.
+  EXPECT_TRUE(core.read_blob(id_a).has_value());
+  core.compact();  // GC runs only after the new log is durably renamed
+  EXPECT_FALSE(core.read_blob(id_a).has_value());  // orphan collected
+  EXPECT_TRUE(core.read_blob(id_b).has_value());   // referenced blob kept
+}
+
+TEST_F(CoreTest, ByteBudgetEvictionIsReproducedOnReplay) {
+  {
+    Core core(path_, /*max_entries=*/0, kNoAutoCompact, /*max_bytes=*/10);
+    core.start();
+    core.add("aaaaa", 1);  // 5 bytes
+    core.add("bbbbb", 2);  // 5 -> total 10
+    core.add("ccccc", 3);  // 5 -> 15 > 10 -> evict "aaaaa"
+  }
+  Core reopened(path_, 0, kNoAutoCompact, /*max_bytes=*/10);
+  reopened.start();
+  EXPECT_FALSE(contains(reopened, "aaaaa", 10));
+  EXPECT_TRUE(contains(reopened, "bbbbb", 10));
+  EXPECT_TRUE(contains(reopened, "ccccc", 10));
+}
+
+TEST_F(CoreTest, LegacyLogMigratesToV1OnStart) {
+  write_v0_log({{1, "old1"}, {2, "old2"}});
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    EXPECT_TRUE(contains(core, "old1", 10));
+    EXPECT_TRUE(contains(core, "old2", 10));
+  }
+  // Migration rewrote the log in v1 format, so it now carries the header and a
+  // reopen replays cleanly.
+  EXPECT_EQ(first_bytes(4), "CLPD");
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  EXPECT_TRUE(contains(reopened, "old1", 10));
+  EXPECT_TRUE(contains(reopened, "old2", 10));
+}
+
+TEST_F(CoreTest, PerImageCapSkipsOversizeImages) {
+  Core core(path_, 100, kNoAutoCompact, /*max_bytes=*/0, /*max_blob_bytes=*/10);
+  core.start();
+  add_image(core, "0123456789AB", 1, 1, ImageFormat::Png, 1);  // 12 bytes > cap
+  add_image(core, "small", 1, 1, ImageFormat::Png, 2);          // 5 bytes <= cap
+  EXPECT_EQ(core.stats().entry_count, 1u);
+  EXPECT_FALSE(core.read_blob(clipd::content_id(Kind::Image, "0123456789AB"))
+                   .has_value());
+  EXPECT_TRUE(
+      core.read_blob(clipd::content_id(Kind::Image, "small")).has_value());
 }
 
 }  // namespace

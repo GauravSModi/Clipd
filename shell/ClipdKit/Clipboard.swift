@@ -4,23 +4,53 @@
 // inviolable contracts from clipd.h:
 //   * Threading — a ClipdCore is not thread-safe; every call is serialized onto
 //     one private serial queue.
-//   * Memory — C++ owns every allocation. After clipd_search we copy each field
-//     into native Swift values, then hand the block straight back to
-//     clipd_free_results; no C++ pointer outlives the call.
+//   * Memory — C++ owns every allocation. After clipd_search (and
+//     clipd_read_blob) we copy each field into native Swift values, then hand the
+//     block straight back to the matching free function; no C++ pointer outlives
+//     the call.
 
 import CClipd
 import Foundation
 
+/// What a captured entry holds.
+public enum ClipKind: Equatable {
+    case text
+    case image
+    case file
+}
+
+/// Image encoding, so paste-back can write the right pasteboard type.
+public enum ClipImageFormat: Equatable {
+    case png
+    case tiff
+
+    /// The ClipdImageFormat value the C API expects.
+    var cValue: Int32 { self == .tiff ? Int32(CLIPD_IMAGE_TIFF.rawValue)
+                                      : Int32(CLIPD_IMAGE_PNG.rawValue) }
+}
+
 /// One search hit, copied fully out of C++ memory.
 public struct Match: Equatable {
-    public let text: String
+    public let text: String       // display string: text / path / image label
+    public let id: String         // sha256-hex identity; an image's blob key
     public let timestamp: Int64
     public let score: Float
+    public let kind: ClipKind
+    public let byteSize: UInt64
+    public let width: UInt32
+    public let height: UInt32
 
-    public init(text: String, timestamp: Int64, score: Float) {
+    public init(text: String, timestamp: Int64, score: Float, id: String = "",
+                kind: ClipKind = .text, byteSize: UInt64 = 0, width: UInt32 = 0,
+                height: UInt32 = 0) {
         self.text = text
+        self.id = id
         self.timestamp = timestamp
         self.score = score
+        self.kind = kind
+        self.byteSize = byteSize
+        self.width = width
+        self.height = height
     }
 }
 
@@ -28,10 +58,12 @@ public struct Match: Equatable {
 public struct Stats: Equatable {
     public let entryCount: Int
     public let logBytes: UInt64
+    public let storeBytes: UInt64
 
-    public init(entryCount: Int, logBytes: UInt64) {
+    public init(entryCount: Int, logBytes: UInt64, storeBytes: UInt64 = 0) {
         self.entryCount = entryCount
         self.logBytes = logBytes
+        self.storeBytes = storeBytes
     }
 }
 
@@ -47,10 +79,13 @@ public final class Clipboard {
     private let core: OpaquePointer
     private let queue = DispatchQueue(label: "com.clipd.core")
 
-    /// Open (and replay) the log at `logPath`. Throws if the core can't start
-    /// — e.g. an unwritable path or a replay failure (clipd_create returns NULL).
-    public init(logPath: String, maxEntries: Int, compactThresholdBytes: UInt64) throws {
-        guard let handle = clipd_create(logPath, maxEntries, compactThresholdBytes) else {
+    /// Open (and replay) the log at `logPath`. `maxBytes` caps the summed live
+    /// byte size (0 = unbounded); `maxBlobBytes` rejects a single image larger
+    /// than the cap (0 = no per-image limit). Throws if the core can't start.
+    public init(logPath: String, maxEntries: Int, compactThresholdBytes: UInt64,
+                maxBytes: UInt64 = 0, maxBlobBytes: UInt64 = 0) throws {
+        guard let handle = clipd_create(logPath, maxEntries, compactThresholdBytes,
+                                        maxBytes, maxBlobBytes) else {
             throw ClipdError.creationFailed
         }
         core = handle
@@ -60,12 +95,46 @@ public final class Clipboard {
         clipd_destroy(core)
     }
 
-    /// Record a copy of `text` stamped at `timestampMs` (epoch ms).
+    /// Record a text copy of `text` stamped at `timestampMs` (epoch ms).
     public func add(_ text: String, at timestampMs: Int64) throws {
         try queue.sync {
             if clipd_add(core, text, timestampMs) != 0 {
                 throw ClipdError.addFailed
             }
+        }
+    }
+
+    /// Record an image copy. The bytes are content-addressed into the blob store
+    /// (and deduplicated); `width`/`height`/`format` are supplied by the shell.
+    public func addImage(_ data: Data, width: UInt32, height: UInt32,
+                         format: ClipImageFormat, at timestampMs: Int64) throws {
+        try queue.sync {
+            let rc = data.withUnsafeBytes { raw -> Int32 in
+                clipd_add_image(core, raw.bindMemory(to: UInt8.self).baseAddress,
+                                data.count, width, height, format.cValue,
+                                timestampMs)
+            }
+            if rc != 0 { throw ClipdError.addFailed }
+        }
+    }
+
+    /// Record a file copy by reference (its `path`), not its contents.
+    public func addFile(_ path: String, at timestampMs: Int64) throws {
+        try queue.sync {
+            if clipd_add_file(core, path, timestampMs) != 0 {
+                throw ClipdError.addFailed
+            }
+        }
+    }
+
+    /// Fetch the bytes of the blob `id` (an image Match's id), copied out of C++
+    /// memory. Returns nil if the blob is missing.
+    public func readBlob(id: String) -> Data? {
+        queue.sync {
+            var len = 0
+            guard let ptr = clipd_read_blob(core, id, &len) else { return nil }
+            defer { clipd_free_blob(ptr) }
+            return Data(bytes: ptr, count: len)
         }
     }
 
@@ -83,25 +152,40 @@ public final class Clipboard {
 
             return (0..<count).map { index in
                 let match = matches[index]
+                let kind: ClipKind
+                if match.kind == CLIPD_IMAGE {
+                    kind = .image
+                } else if match.kind == CLIPD_FILE {
+                    kind = .file
+                } else {
+                    kind = .text
+                }
                 return Match(text: match.text.map(String.init(cString:)) ?? "",
                              timestamp: match.timestamp,
-                             score: match.score)
+                             score: match.score,
+                             id: match.id.map(String.init(cString:)) ?? "",
+                             kind: kind,
+                             byteSize: match.byte_size,
+                             width: match.width,
+                             height: match.height)
             }
         }
     }
 
-    /// Current live-entry count and on-disk log size.
+    /// Current live-entry count, on-disk log size, and live byte usage.
     public func stats() throws -> Stats {
         try queue.sync {
             var out = ClipdStats()
             if clipd_stats(core, &out) != 0 {
                 throw ClipdError.statsFailed
             }
-            return Stats(entryCount: out.entry_count, logBytes: out.log_bytes)
+            return Stats(entryCount: out.entry_count, logBytes: out.log_bytes,
+                         storeBytes: out.store_bytes)
         }
     }
 
-    /// Rewrite the log to exactly the live set (drops superseded/evicted records).
+    /// Rewrite the log to exactly the live set (drops superseded/evicted records)
+    /// and GC blobs no longer referenced.
     public func compact() throws {
         try queue.sync {
             if clipd_compact(core) != 0 {

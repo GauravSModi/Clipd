@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import ApplicationServices
 import ServiceManagement
 import KeyboardShortcuts
 import ClipdKit
@@ -16,6 +17,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var suppressAutoDismiss = false
     /// Local monitor for ↑/↓ list navigation while the query field stays focused.
     private var keyMonitor: Any?
+    /// The app that was frontmost when the panel was summoned — paste-back targets
+    /// it. Captured in showPanel() before we steal focus.
+    private var previousApp: NSRunningApplication?
 
     // Held for the process lifetime.
     private var clipboard: Clipboard!
@@ -37,7 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                        monitor: monitor,
                                        compactThresholdBytes: compactThresholdBytes)
         model = SearchModel(controller: controller)
-        model.onChoose = { [weak self] in self?.hidePanel() }
+        model.onActivate = { [weak self] match, requested in
+            self?.activate(match, requested: requested)
+        }
 
         startPolling()
         setupStatusItem()
@@ -48,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         promptLaunchAtLoginIfFirstRun()
+        requestAccessibilityOnFirstRun()
     }
 
     // MARK: - Pipeline
@@ -191,6 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func showPanel() {
         model.reset()
+        // Capture the app we're stealing focus from *before* activating, so
+        // paste-back can hand the keystroke back to it.
+        previousApp = NSWorkspace.shared.frontmostApplication
         panel.center()
         // Becoming key during activation must not be misread as a focus-loss
         // dismissal; suppress auto-dismiss until the panel has settled as key.
@@ -228,6 +238,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func removeKeyMonitor() {
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
+    }
+
+    // MARK: - Paste-back
+
+    /// Resolve the requested action against the Accessibility permission (paste
+    /// degrades to copy when not granted), put the entry on the pasteboard, then
+    /// either hand focus back for a manual paste (copy) or paste it in (paste).
+    private func activate(_ match: Match, requested: ClipdPasteAction) {
+        let action = clipdResolvePasteAction(requested: requested,
+                                             accessibilityTrusted: AXIsProcessTrusted())
+        SystemClipboardWriter.write(match.text)
+        switch action {
+        case .copy:  hidePanel()
+        case .paste: pasteBack()
+        }
+    }
+
+    /// Reactivate the prior app and synthesize ⌘V once it's actually frontmost.
+    /// We orderOut (not hidePanel/NSApp.hide, which would fight our activate for
+    /// focus) and let the explicit activate be the single source of focus truth.
+    private func pasteBack() {
+        removeKeyMonitor()
+        panel.orderOut(nil)
+        guard let target = previousApp else { return }
+
+        // Fire ⌘V when `target` becomes frontmost; fall back to a short delay only
+        // if the activation notification never arrives. Guarded so it fires once.
+        var observer: NSObjectProtocol?
+        var fired = false
+        let fire: () -> Void = { [weak self] in
+            guard !fired else { return }
+            fired = true
+            if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+            self?.synthesizePaste()
+        }
+        observer = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            if app?.processIdentifier == target.processIdentifier { fire() }
+        }
+        target.activate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: fire)
+    }
+
+    private func synthesizePaste() {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        let vKey: CGKeyCode = 0x09   // kVK_ANSI_V
+        let down = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false)
+        down?.flags = .maskCommand
+        up?.flags = .maskCommand
+        down?.post(tap: .cghidEventTap)
+        up?.post(tap: .cghidEventTap)
+    }
+
+    /// One-time prompt for the Accessibility permission paste-back needs. Gated by
+    /// its own flag (independent of the launch-at-login prompt) so it also fires
+    /// for installs that predate this feature; skipped if already trusted.
+    private func requestAccessibilityOnFirstRun() {
+        let key = "didRequestAccessibility"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        guard !AXIsProcessTrusted() else { return }
+
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
     /// Auto-dismiss when the user interacts with something behind the panel

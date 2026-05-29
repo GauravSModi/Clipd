@@ -55,7 +55,11 @@ struct SearchView: View {
                         .listRowBackground(index == model.selectedIndex
                                            ? Color.accentColor.opacity(0.20)
                                            : Color.clear)
-                        .onTapGesture { model.choose(match) }
+                        .onTapGesture {
+                            // ⌘-click copies only; a plain click pastes back.
+                            let copy = NSEvent.modifierFlags.contains(.command)
+                            model.choose(match, copy ? .copy : .paste)
+                        }
                 }
             }
             .listStyle(.plain)
@@ -116,14 +120,18 @@ struct SearchView: View {
         }
     }
 
-    /// Invisible ⌘1–9 buttons — keyboard shortcuts work regardless of visibility,
-    /// and the .command modifier means plain digit keys still type into the field.
+    /// Invisible keyboard-shortcut buttons (shortcuts work regardless of
+    /// visibility): ⌘1–9 paste the Nth recent, and ⌘↵ copies the selection
+    /// without pasting. The .command modifier means plain digit/return keys still
+    /// type / submit in the field.
     private var recentShortcutButtons: some View {
         ZStack {
             ForEach(1...9, id: \.self) { n in
                 Button("") { model.chooseRecent(n) }
                     .keyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: .command)
             }
+            Button("") { model.chooseSelected(.copy) }
+                .keyboardShortcut(.return, modifiers: .command)
         }
         .frame(width: 0, height: 0)
         .opacity(0)

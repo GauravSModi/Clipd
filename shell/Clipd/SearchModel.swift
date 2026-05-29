@@ -13,8 +13,10 @@ final class SearchModel: ObservableObject {
 
     private let controller: HistoryController
 
-    /// Called after an entry is chosen (copied back), so the panel can dismiss.
-    var onChoose: (() -> Void)?
+    /// Called when an entry is activated with the requested action (paste vs
+    /// copy). The app layer owns the paste mechanics (prior-app reactivation,
+    /// Accessibility check, ⌘V synthesis) and the panel dismissal.
+    var onActivate: ((Match, ClipdPasteAction) -> Void)?
 
     init(controller: HistoryController) {
         self.controller = controller
@@ -38,20 +40,19 @@ final class SearchModel: ObservableObject {
         selectedIndex = clipdMovedSelection(selectedIndex, by: delta, count: results.count)
     }
 
-    /// Activate the highlighted row (Enter).
-    func chooseSelected() {
+    /// Activate the highlighted row (Enter pastes, ⌘↵ copies).
+    func chooseSelected(_ action: ClipdPasteAction = .paste) {
         guard results.indices.contains(selectedIndex) else { return }
-        choose(results[selectedIndex])
+        choose(results[selectedIndex], action)
     }
 
     /// Activate the Nth recent row for a ⌘1–9 shortcut (no-op when out of range).
-    func chooseRecent(_ n: Int) {
+    func chooseRecent(_ n: Int, _ action: ClipdPasteAction = .paste) {
         guard let index = clipdRecentIndex(forShortcut: n, count: results.count) else { return }
-        choose(results[index])
+        choose(results[index], action)
     }
 
-    func choose(_ match: Match) {
-        SystemClipboardWriter.write(match.text)
-        onChoose?()
+    func choose(_ match: Match, _ action: ClipdPasteAction = .paste) {
+        onActivate?(match, action)
     }
 }

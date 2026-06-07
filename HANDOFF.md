@@ -1,17 +1,18 @@
-# Handoff — image/file capture shipped; pinned/delete/clear next
+# Handoff — pinned / delete / clear shipped
 
 ## Status
 
-All four planned phases plus three post-v1 batches are done on `master`: a
+All four planned phases plus four post-v1 batches are done on `master`: a
 small tweak (timestamps in the panel + click-away auto-dismiss), a four-feature
 shell UX batch (direct paste-back, keyboard selection, content-type
-affordances, launch-at-login), and **image/file capture** — the first post-v1
-work to cross every layer (core / C API / log format / shell). Clipd is a
-fast, local-first macOS clipboard manager: a C++ core (store + fuzzy search +
-crash-safe log + content-addressed blob store) behind a flat `extern "C"` API,
-driven by a thin Swift menu-bar shell. **Next up: pinned/favorites + delete an
-entry + clear history — built on the identity + record-type machinery
-image/file just landed; see "Next" below.**
+affordances, launch-at-login), **image/file capture** (the first post-v1 work
+to cross every layer), and **pinned/favorites + delete + clear history** (the
+second cross-layer batch, built on image/file's identity + record-type
+machinery). Clipd is a fast, local-first macOS clipboard manager: a C++ core
+(store + fuzzy search + crash-safe log + content-addressed blob store) behind a
+flat `extern "C"` API, driven by a thin Swift menu-bar shell. **See "Shipped —
+pinned / delete / clear" below; no further batch is planned — remaining work is
+run-the-app verification + the deferred Future-Work items.**
 
 - Phase 1 — C++ core: `git show cb65551`.
 - Phase 2 — hardening + C API: `git show f4a2bbd 18e6549`.
@@ -22,13 +23,15 @@ image/file just landed; see "Next" below.**
   `git show b064fbb`; Plan B (direct paste-back) `git show 4c1d5ad`.
 - Image/file capture — code: `git show a23ef25`; PRD amendment + README:
   `git show a2160ec`.
+- Pinned / delete / clear — this batch (uncommitted working tree at handoff;
+  split the code commit from the docs/PRD/README commit per the usual rule).
 
-State: **117 GoogleTest cases** + **54 ClipdKit XCTest cases** green; C++ core
+State: **147 GoogleTest cases** + **62 ClipdKit XCTest cases** green; C++ core
 clean under ASan + UBSan; ClipdKit clean under ASan + TSan; the menu-bar app
-builds. Plan A's GUI was confirmed working at runtime; **paste-back (Plan B)
-and the image/file UI/paste-back are not yet runtime-verified — run the app
-with the Accessibility permission granted to confirm them** (see "Shipped"
-below).
+builds. Plan A's GUI was confirmed working at runtime; **paste-back (Plan B),
+the image/file UI/paste-back, and the new pin/delete/clear UI are not yet
+runtime-verified — run the app with the Accessibility permission granted to
+confirm them** (see the Shipped sections below).
 
 Re-verify anytime (full commands in `CLAUDE.md` → Build & test):
 ```sh
@@ -64,7 +67,9 @@ swift test
     `maxBlobBytes` (default 0 = unbounded) for the byte budget + per-image cap.
   - `PasteboardMonitor` — changeCount polling + concealed/transient skip, now
     emitting a typed `Capture` (text / image / file) via `onCapture`. Priority
-    is text → image → file (rich text with an inline image stays as text);
+    is **file → text → image** (corrected 2026-06-06: a Finder file copy also
+    carries the filename as text + the icon as a tiff, so file must be checked
+    first; text still beats image so rich text with an inline image stays text);
     images come through `imageCapture()` (PNG/TIFF data + dims + format) and
     files through `fileURLPath()` on the `PasteboardReading` protocol;
     `SystemPasteboard` is the real adapter and also exposes `writeImage` /
@@ -198,7 +203,8 @@ authority and pure-in-memory, `FuzzyMatcher` stays pure.
   `list`/`search` so migration / blob-GC / round-trip can be scripted without
   the shell.
 - **Shell.** `Clipboard.addImage`/`addFile`/`readBlob`; `PasteboardMonitor`
-  emits typed `Capture` (text → image → file priority) via `onCapture`;
+  emits typed `Capture` (file → text → image priority — corrected 2026-06-06,
+  see the capture-priority note) via `onCapture`;
   `SystemPasteboard` reads PNG/TIFF + file URLs; `SystemClipboardWriter` writes
   the right pasteboard type back. UI: ImageIO-downsampled thumbnails (not
   `NSImage(data:)`), system file icons, kind-aware paste-back with PNG/TIFF
@@ -223,41 +229,58 @@ header format; the C API tests assert specific kind enum values, 64-char ids,
 and binary round-trip with embedded NULs). Worth knowing when reading the
 log/C-API tests.
 
-## Next — pinned/favorites + delete + clear (one batch, planned next)
+## Shipped — pinned / delete / clear (post-v1, cross-layer)
 
-PRD Future-Work items; a focused core extension that **slots onto the
-machinery image/file already landed**. The hard parts are already in place:
-- Per-entry identity exists (`id = sha256-hex(kind_byte ‖ content)`,
-  `src/identity.{hpp,cpp}`) and is exposed via `ClipdMatch.id`, so pin/delete
-  already have a stable key — no new identity scheme needed.
-- The log carries a v1 header + per-record type tag and has reserved type
-  slots for `PIN` / `UNPIN` / `TOMBSTONE` / `CLEAR` (`src/log.cpp`); compaction
-  is already fsync-durable; replay tolerates new record types behind the
-  type-tag dispatch (just extend the switch).
-- The single-arena C result block already packs `id` alongside `text`, so
-  adding `pinned` to `ClipdMatch` is one more field with no model change.
+The second post-v1 batch to cross every layer, built on image/file's identity +
+record-type machinery. PRD amendment dated 2026-06-06. Invariants **extended,
+not bypassed**: every new record type has round-trip + torn-tail recovery tests,
+the C allocates / C frees / single-arena model still holds, `ClipStore` stays
+the liveness authority and pure-in-memory, `FuzzyMatcher` stays pure.
 
-What still needs deciding/building:
-- **Pinned:** add `Entry.pinned`; `ClipStore` exempts pinned from LRU eviction
-  (evict the least-recent **unpinned**); pinned surfaced first (separate
-  section vs sort-to-top — brainstorm). Persisted via PIN/UNPIN records,
-  applied in replay order; compaction folds them into the live set.
-- **Delete one entry:** `ClipStore::remove(id)`; persisted via a TOMBSTONE
-  record (append-only can't erase) keyed on `id`; replay drops tombstoned
-  entries; compaction discards them. For images, the tombstone also makes the
-  blob orphan — collected by the next compaction's blob GC (no new GC code).
-- **Clear all:** clear the store + rewrite the log to empty (a `compact([])`
-  / CLEAR record). Decide interaction with pinned (clear-all vs
-  clear-unpinned — brainstorm). Compaction's blob GC reclaims every blob.
-- **C API + shell:** `clipd_set_pinned` / `clipd_delete` / `clipd_clear`;
-  `ClipdMatch` gains `pinned`; UI adds a pin toggle (star), per-row delete,
-  and a clear-history action (with confirmation). All on the existing serial
-  queue.
+Decisions taken (with the user): pinned surfaces as a **separate "Pinned"
+section**; clear is **clear-unpinned** (pins survive); deleting a pinned row is
+**allowed but confirmed**; **clear confirms, unpinned delete is instant**;
+deleted image blobs are reclaimed at the **next compaction** (deferred GC, no
+targeted delete); tombstones are **not** carried into the compacted log;
+`clipd_set_pinned` is **idempotent set-to-bool**.
 
-Open brainstorm questions: pinned ordering/section; clear-all vs
-clear-unpinned; delete/clear confirmation UX; whether a deleted blob should
-be GC'd immediately (`ClipStore::remove` triggers a targeted blob delete) or
-wait for the next compaction (matches current "GC at compaction" rule).
+- **Control records.** The four reserved log tags are implemented as control
+  records (state change keyed on an `id`, no content/timestamp): `PIN`=3,
+  `UNPIN`=4, `TOMBSTONE`=5, `CLEAR`=6. `Log::append_control` + a second
+  `replay` callback (`on_control`); content and control records replay in
+  strict file order. Round-trip, torn-tail, and replay-order tests in
+  `tests/test_log.cpp`.
+- **Pinned.** `Entry.pinned`; `ClipStore` evicts the least-recent **unpinned**
+  entry (never the most-recent insert), exempting pins from both the count cap
+  and the byte budget; `set_pinned`/`pinned_state`; eviction is upsert-only so
+  replay is faithful. `Core::search` sorts **pinned-first** (the comparator, not
+  `FuzzyMatcher`) so an old pin still surfaces past `max_results`.
+- **Delete.** `ClipStore::remove` + `Core::remove` writes a TOMBSTONE; replay
+  drops the entry; compaction discards both the tombstone and the dead record. A
+  deleted image's blob is reclaimed by the next compaction's existing GC (test:
+  `CoreTest.DeletedImageBlobReclaimedAtNextCompaction`).
+- **Clear.** `Core::clear` = clear-unpinned: a CLEAR record (durable for the
+  crash window) → `ClipStore::clear_unpinned` → compact to a pinned-only log +
+  blob GC. Pinned state survives compaction because `Log::compact` re-emits a
+  PIN record after each pinned entry's content record (content schema unchanged).
+- **C API.** `clipd_set_pinned` / `clipd_delete` / `clipd_clear`;
+  `ClipdMatch.pinned` packed into the same single-arena block. Tests in
+  `tests/test_c_api.cpp` (NULL-safety, the pinned field round-trips, one free).
+- **CLI.** `pin` / `unpin` / `delete` / `clear` verbs and a pinned column in
+  `list`/`search` (columns: ts, kind, pinned, id, score, text).
+- **Shell.** `Clipboard.setPinned`/`delete`/`clear` + `Match.pinned`;
+  `HistoryController` passthroughs; pure `clipdPinnedPrefixCount`
+  (`shell/ClipdKit/PinnedSplit.swift`, tested). UI: per-row star + trash, a
+  "Pinned"/"Recent" section split, and a status-menu "Clear History…". Clear is
+  confirmed; per-row delete is instant for unpinned and confirmed for pinned
+  (`SearchModel.onConfirmDelete` → `AppDelegate` NSAlert).
+
+State: 147 GoogleTest + 62 ClipdKit XCTest green; C++ clean under ASan + UBSan;
+ClipdKit clean under ASan + TSan; menu-bar app builds. **Run-the-app
+verification still pending**: the star toggle moving a row into the Pinned
+section, per-row delete (instant unpinned / confirmed pinned), the status-menu
+"Clear History…" confirmation keeping pins, and **pin + delete persisting across
+an app restart**.
 
 ## Future work (deferred — see `prd_clipd.md` → Future work)
 
@@ -269,8 +292,8 @@ wait for the next compaction (matches current "GC at compaction" rule).
 - **FuzzyMatcher scoring floor:** subsequence matching returns all in-order hits
   with no score floor (a `FuzzyMatcher`/core change with its own tests; correct
   by design per the PRD — confirm before touching the core).
-- **Concurrent compaction** and the technical blog post. (Image/file support
-  has shipped; pinned/delete/clear is "Next" above — active, not deferred.)
+- **Concurrent compaction** and the technical blog post. (Image/file capture
+  and pinned/delete/clear have both shipped — see the Shipped sections above.)
 
 ## Invariants to hold (from CLAUDE.md — non-negotiable)
 

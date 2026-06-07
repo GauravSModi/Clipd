@@ -6,9 +6,11 @@ storage engine**, exposed over a flat `extern "C"` API and driven by a thin
 Swift menu-bar shell. **All four phases are complete** — the standalone C++ core
 (also driven by a scriptable CLI harness), the C API boundary, the macOS
 menu-bar app, and polish (eviction, fsync-durable compaction, a recovery demo) —
-with tests, sanitizers, and benchmarks. A post-v1 shell-enhancement batch
-(direct paste-back, keyboard selection, content-type affordances, and
-launch-at-login) is also shipped.
+with tests, sanitizers, and benchmarks. Post-v1 batches are also shipped: a
+shell-enhancement batch (direct paste-back, keyboard selection, content-type
+affordances, launch-at-login), **image/file capture** (content-addressed blob
+store, type-tagged log), and **pinned-favorites + delete + clear-history**
+(new crash-safe control records keyed on a content-derived id).
 
 ## Architecture
 
@@ -18,12 +20,13 @@ that the Swift shell links against:
 | Unit | Responsibility |
 |------|----------------|
 | `Crc32` | IEEE CRC32 checksum (table-based). |
-| `ClipStore` | In-memory entries: dedup, recency ordering, bounded-size LRU eviction. Sole authority on what is *live*. |
+| `ClipStore` | In-memory entries: dedup, recency ordering, bounded-size LRU eviction (pinned entries are exempt — the least-recent *unpinned* entry is evicted). Sole authority on what is *live*. |
 | `FuzzyMatcher` | Pure subsequence match + quality scoring (contiguity, word/camelCase boundary, position, recency). |
-| `Log` | Crash-safe append-only log: length+CRC32 records, torn-write truncation, compaction via atomic rename, replay. |
-| `Core` | Coordinator — wires the store, log, and matcher together. No policy of its own. |
-| `clipd.h` (C API) | Flat `extern "C"` boundary (`clipd_create`/`add`/`search`/`compact`/`stats`/`free_results`); the only surface the shell sees. |
-| `clipd-cli` | Scriptable front-end (`add`/`search`/`list`/`compact`/`stats`/`replay`). |
+| `BlobStore` | Content-addressed image-byte store (`<log>.blobs/<id>`): write-once, atomic rename + fsync, GC at compaction. |
+| `Log` | Crash-safe append-only log: `"CLPD"`+version header, type-tagged length+CRC32 records (text/image/file + pin/unpin/tombstone/clear), torn-write truncation, compaction via atomic rename, replay. |
+| `Core` | Coordinator — wires the store, log, blob store, and matcher together; owns identity derivation and pinned-first search ordering. No other policy of its own. |
+| `clipd.h` (C API) | Flat `extern "C"` boundary (`clipd_create`/`add`/`add_image`/`add_file`/`search`/`read_blob`/`set_pinned`/`delete`/`clear`/`compact`/`stats`/`free_results`); the only surface the shell sees. |
+| `clipd-cli` | Scriptable front-end (`add`/`add-image`/`add-file`/`search`/`list`/`pin`/`unpin`/`delete`/`clear`/`compact`/`stats`/`replay`). |
 
 ## Swift menu-bar shell
 
@@ -41,6 +44,10 @@ policy of its own — that all lives in the core):
   it isn't granted.
 - **Content-type affordances** — a snippet that's a whole URL, email, or hex
   color gets an inline action: open the link, compose an email, or a color swatch.
+- **Pin · delete · clear** — a per-row star pins a favorite (pinned entries
+  surface in their own section and survive eviction *and* clear); a per-row trash
+  deletes (instant for unpinned, confirmed for pinned); "Clear History…" in the
+  status menu wipes unpinned entries (pins kept), with confirmation.
 - **Global hotkey** ⌘⇧V (via `KeyboardShortcuts`) to summon the panel.
 - **Pasteboard polling** every 0.5 s on a `changeCount` check, with
   **concealed/transient skip** so password-manager (`ConcealedType`) and
@@ -53,11 +60,11 @@ into Swift values and handed straight back to `clipd_free_results`, so no C++
 pointer outlives the call. Idle CPU was measured at ~0% in Phase 3 (the poll
 loop is a single integer `changeCount` comparison twice a second).
 
-The testable, UI-free layer (`ClipdKit`) is a SwiftPM library with 44 XCTest
+The testable, UI-free layer (`ClipdKit`) is a SwiftPM library with 62 XCTest
 cases — including pure helpers for the content-type classifier, keyboard-selection
-index math, and the paste-vs-copy fallback rule. The menu-bar app is an Xcode
-target generated from `project.yml`. See [CLAUDE.md](CLAUDE.md) for the exact
-`swift test` / `xcodebuild` invocations.
+index math, the paste-vs-copy fallback rule, and the pinned-section split. The
+menu-bar app is an Xcode target generated from `project.yml`. See
+[CLAUDE.md](CLAUDE.md) for the exact `swift test` / `xcodebuild` invocations.
 
 ## Build & test
 
@@ -189,11 +196,12 @@ this scale; an index becomes worthwhile around ~1M entries (see *Limitations*).
   only; if the file is moved or deleted before paste-back, the reference points
   nowhere. Image bytes, by contrast, are captured in full (their pasteboard
   representation is the bytes themselves).
-- **Capture priority is text → image → file.** A copy carrying both text and an
-  image is stored as text (the more searchable representation). A copy that
-  presents both a file URL and a plain text representation is also stored as
-  text, which can surprise on some apps; Finder ⌘C typically only puts a file
-  URL, which is captured as a file as expected.
+- **Capture priority is file → text → image.** A copied file is detected first:
+  Finder's ⌘C puts the file URL **plus** the filename as plain text **plus** the
+  icon as an image, so checking text first would store a file as just its name
+  (and pasting it back would yield text, not the file). Text still beats image,
+  so rich text with an inline image is stored as text (the more searchable
+  representation).
 - **Fuzzy matching is ASCII-only.** Case-folding and word-boundary detection
   target ASCII; UTF-8 multibyte sequences are matched byte-for-byte and never
   split, but accent-insensitive / CJK / emoji handling is Future Work.
@@ -201,3 +209,11 @@ this scale; an index becomes worthwhile around ~1M entries (see *Limitations*).
   index is Future Work for scaling to ~1M.
 - **Single-threaded core.** The core is lock-free; the Swift shell serializes
   every C call on one `DispatchQueue`.
+- **Delete / clear are not secure erase.** A deleted or cleared entry leaves the
+  live set immediately, and its records (and any image blob) are dropped at the
+  next compaction — but until then the bytes still exist in the plaintext log /
+  blob store. This is removal, not cryptographic erasure (encryption-at-rest is
+  Future Work).
+- **Pinned entries are exempt from eviction *and* the byte budget.** Pinning many
+  large images can push total on-disk usage above the configured byte budget,
+  since pinned entries are never evicted to reclaim space.

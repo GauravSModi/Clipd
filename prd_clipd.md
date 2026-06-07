@@ -141,8 +141,10 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > Swift shell), so the storage/search contracts are **extended** here, not
 > bypassed.
 > - **Capture:** images are stored as bytes; files are stored **by reference**
->   (the path), not by copying contents. Capture priority is text → image → file,
->   so a copy carrying both text and an image is stored as text.
+>   (the path), not by copying contents. Capture priority is **file → text →
+>   image** (corrected 2026-06-06 — see the note below): a file copy is detected
+>   first because Finder ⌘C also puts the filename as text and the icon as an
+>   image; text still beats image so rich text with an inline image stays text.
 > - **Identity:** every entry has a stable `id = sha256-hex(kind_byte ‖ content)`.
 >   The leading kind byte is domain separation so a text and a file with the
 >   same content bytes never collide.
@@ -173,6 +175,55 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > a **plaintext blob store on disk** — worse for sensitive images than the
 > already-plaintext text log. The concealed/transient pasteboard filter is
 > still the floor, not security. Encryption-at-rest remains Future Work.
+>
+> **Capture-priority correction (2026-06-06).** The original amendment specified
+> capture priority **text → image → file**; runtime testing showed this made file
+> capture non-functional. A Finder ⌘C on a file puts the file URL **plus** the
+> filename as `public.utf8-plain-text` **plus** the icon as `public.tiff`, so a
+> text-first check always captured the file as just its filename (and paste-back
+> yielded that text, never the file). Corrected to **file → text → image**: a
+> real file URL wins over the filename text and icon; text still beats image so
+> rich text with an inline image stays text. (Fix: `PasteboardMonitor.poll`
+> reorder + regression test `testFinderFileCopyIsCapturedAsFileNotFilenameText`.)
+> Note: this only affects copies made **after** the fix — entries already stored
+> as text are not retroactively re-typed.
+
+> **Post-v1 pinned / delete / clear amendment (2026-06-06).** Promotes the
+> Future-Work item "Pinned/favorite entries" to a shipped feature and adds
+> delete-an-entry and clear-history alongside it (one batch — they share new
+> record types, the existing `id` key, and the eviction/compaction paths). Built
+> directly on the image/file identity + record-type machinery; the storage/search
+> contracts are **extended**, not bypassed.
+> - **Record types:** the four reserved log tags are implemented — `PIN` (3),
+>   `UNPIN` (4), `TOMBSTONE` (5), `CLEAR` (6). Each is a control record (a state
+>   change keyed on an `id`, no content, no timestamp); replay applies content
+>   and control records strictly in file order so the live set is re-derived
+>   chronologically. PIN/UNPIN are last-write-wins, like text dedup.
+> - **Pinned:** `Entry.pinned`; a pinned entry is exempt from eviction (eviction
+>   evicts the least-recent **unpinned** entry, never the most-recent insert).
+>   Pinned matches sort first in search, so an old pin still surfaces, and the
+>   panel renders them as a separate **"Pinned" section**. Persisted via
+>   PIN/UNPIN records; compaction re-emits a PIN record after each pinned entry's
+>   content record (the content schema is unchanged).
+> - **Delete:** `clipd_delete` writes a TOMBSTONE; replay drops the entry;
+>   compaction discards both the tombstone and the dead record. A deleted image's
+>   blob is reclaimed by the **next compaction's existing GC**, not eagerly
+>   (matches the "GC at compaction, post-rename" rule).
+> - **Clear:** `clipd_clear` keeps pinned entries (**clear-unpinned**). It writes
+>   a CLEAR record (durable for the crash window) then compacts to a pinned-only
+>   log, GC-ing every now-unreferenced blob.
+> - **C API + shell:** `clipd_set_pinned` (idempotent set-to-bool) / `clipd_delete`
+>   / `clipd_clear`; `ClipdMatch` gains `pinned` (still one single-arena alloc).
+>   The panel adds a per-row star toggle and trash button and a status-menu
+>   "Clear History…". Clear is confirmed; per-row delete is instant for unpinned
+>   rows and **confirmed for pinned** rows (a pin is explicitly marked important
+>   and there is no undo).
+>
+> **Limitations to keep framed honestly:** delete/clear are not "secure erase" —
+> the bytes leave the live set and are dropped at the next compaction, but the
+> store remains plaintext and unencrypted (Future Work). Pinning large images
+> counts toward the byte budget and can push total on-disk usage above it (pinned
+> entries are never evicted to reclaim space).
 
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).

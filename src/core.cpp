@@ -76,6 +76,17 @@ void Core::start() {
         break;
     }
     store_.upsert(std::move(entry));
+  },
+  // Control records apply in the SAME file order as content records, so the
+  // live set is re-derived chronologically (a PIN takes effect before the later
+  // adds that would otherwise evict the pinned entry).
+  [this](ControlOp op, const std::string& id) {
+    switch (op) {
+      case ControlOp::Pin:       store_.set_pinned(id, true);  break;
+      case ControlOp::Unpin:     store_.set_pinned(id, false); break;
+      case ControlOp::Tombstone: store_.remove(id);            break;
+      case ControlOp::Clear:     store_.clear_unpinned();      break;
+    }
   });
 
   // A pre-feature (header-less) log is migrated to v1 by rewriting it; otherwise
@@ -135,6 +146,32 @@ void Core::add_file(std::string path, int64_t timestamp) {
   store_.upsert(std::move(e));
 }
 
+void Core::set_pinned(const std::string& id, bool pinned) {
+  auto state = store_.pinned_state(id);
+  if (!state || *state == pinned) return;  // absent or already set: no log noise
+  // Durable first: the PIN/UNPIN record before the store mutation.
+  log_.append_control(pinned ? ControlOp::Pin : ControlOp::Unpin, id);
+  store_.set_pinned(id, pinned);
+}
+
+void Core::remove(const std::string& id) {
+  if (!store_.pinned_state(id)) return;  // not live: nothing to tombstone
+  log_.append_control(ControlOp::Tombstone, id);
+  store_.remove(id);
+  // An image's blob is intentionally left orphaned here; the next compact()'s
+  // GC reclaims it (the existing "GC at compaction, post-rename" rule).
+}
+
+void Core::clear() {
+  // A durable CLEAR marker first, so a crash before compaction still recovers
+  // the cleared (pinned-only) state on replay.
+  log_.append_control(ControlOp::Clear);
+  store_.clear_unpinned();
+  // Then rewrite the log to the pinned-only live set and GC every unreferenced
+  // blob (compaction's existing blob GC reclaims the cleared images' blobs).
+  compact();
+}
+
 std::optional<std::string> Core::read_blob(const std::string& id) const {
   return blobs_.get(id);
 }
@@ -148,9 +185,14 @@ std::vector<ScoredEntry> Core::search(std::string_view query, size_t max_results
     }
   });
 
-  // Best-first; stable_sort preserves store order (most-recent-first) on ties.
+  // Pinned matches first, then best score; stable_sort preserves store order
+  // (most-recent-first) on ties. Pinned-first is a coordination/surfacing
+  // decision here (FuzzyMatcher stays pure — the score still comes from it), so
+  // a pinned entry always survives max_results truncation and the shell can
+  // render the pinned prefix as its own section.
   std::stable_sort(matches.begin(), matches.end(),
                    [](const ScoredEntry& a, const ScoredEntry& b) {
+                     if (a.entry.pinned != b.entry.pinned) return a.entry.pinned;
                      return a.score > b.score;
                    });
   if (matches.size() > max_results) {

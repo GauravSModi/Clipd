@@ -11,6 +11,7 @@
 #include "crc32.hpp"
 #include "entry.hpp"
 
+using clipd::ControlOp;
 using clipd::Entry;
 using clipd::ImageFormat;
 using clipd::Kind;
@@ -34,6 +35,15 @@ class LogTest : public ::testing::Test {
     std::vector<Entry> out;
     Log log(path_);
     log.replay([&](const Entry& e) { out.push_back(e); });
+    return out;
+  }
+
+  // Capture control records (pin/unpin/tombstone/clear) in file order.
+  std::vector<std::pair<ControlOp, std::string>> replay_controls() {
+    std::vector<std::pair<ControlOp, std::string>> out;
+    Log log(path_);
+    log.replay([](const Entry&) {},
+               [&](ControlOp op, const std::string& id) { out.emplace_back(op, id); });
     return out;
   }
 
@@ -515,6 +525,105 @@ TEST_F(LogTest, CompactingALegacyLogMigratesItToV1) {
   ASSERT_EQ(entries.size(), 2u);
   EXPECT_EQ(entries[0].text, "old1");
   EXPECT_EQ(entries[1].text, "old2");
+}
+
+// --- v1 control records: pin / unpin / tombstone / clear --------------------
+
+TEST_F(LogTest, ControlRecordsRoundTripInOrder) {
+  const std::string id(64, 'a');
+  const std::string id2(64, 'b');
+  {
+    Log log(path_);
+    log.open();
+    log.append_control(ControlOp::Pin, id);
+    log.append_control(ControlOp::Unpin, id);
+    log.append_control(ControlOp::Tombstone, id2);
+    log.append_control(ControlOp::Clear);
+  }
+  auto controls = replay_controls();
+  ASSERT_EQ(controls.size(), 4u);
+  EXPECT_EQ(controls[0].first, ControlOp::Pin);
+  EXPECT_EQ(controls[0].second, id);
+  EXPECT_EQ(controls[1].first, ControlOp::Unpin);
+  EXPECT_EQ(controls[1].second, id);
+  EXPECT_EQ(controls[2].first, ControlOp::Tombstone);
+  EXPECT_EQ(controls[2].second, id2);
+  EXPECT_EQ(controls[3].first, ControlOp::Clear);
+  EXPECT_TRUE(controls[3].second.empty());
+}
+
+TEST_F(LogTest, PinThenUnpinReplayInFileOrder) {
+  const std::string id(64, 'c');
+  {
+    Log log(path_);
+    log.open();
+    log.append_control(ControlOp::Pin, id);
+    log.append_control(ControlOp::Unpin, id);
+  }
+  auto controls = replay_controls();
+  ASSERT_EQ(controls.size(), 2u);
+  EXPECT_EQ(controls[0].first, ControlOp::Pin);   // later record (unpin) wins is
+  EXPECT_EQ(controls[1].first, ControlOp::Unpin);  // a store concern; here just order
+}
+
+TEST_F(LogTest, ContentAndControlReplayInterleavedInOrder) {
+  const std::string id(64, 'd');
+  {
+    Log log(path_);
+    log.open();
+    log.append({"alpha", 1});
+    log.append_control(ControlOp::Pin, id);
+    log.append({"beta", 2});
+  }
+  // The live set is re-derived chronologically only if content and control
+  // records are yielded strictly in file order, not batched.
+  std::vector<std::string> seq;
+  Log log(path_);
+  log.replay([&](const Entry& e) { seq.push_back("e:" + e.text); },
+             [&](ControlOp, const std::string&) { seq.push_back("c"); });
+  ASSERT_EQ(seq.size(), 3u);
+  EXPECT_EQ(seq[0], "e:alpha");
+  EXPECT_EQ(seq[1], "c");
+  EXPECT_EQ(seq[2], "e:beta");
+}
+
+TEST_F(LogTest, TornTailAfterControlRecordIsTruncated) {
+  const std::string id(64, 'e');
+  {
+    Log log(path_);
+    log.open();
+    log.append({"keep", 1});
+    log.append_control(ControlOp::Pin, id);
+  }
+  uint64_t valid_size = file_size();
+  append_raw(std::string("\x40\x00\x00\x00", 4));  // length=64, no payload
+  append_raw("junk");
+
+  auto controls = replay_controls();
+  ASSERT_EQ(controls.size(), 1u);                 // the valid PIN survives
+  EXPECT_EQ(controls[0].first, ControlOp::Pin);
+  EXPECT_EQ(file_size(), valid_size);             // torn tail truncated
+  EXPECT_EQ(replay_all().size(), 1u);             // and the "keep" content too
+}
+
+TEST_F(LogTest, CompactionEmitsPinRecordForPinnedEntries) {
+  // Pinned state must survive compaction: a pinned entry is written as its
+  // content record PLUS a PIN record carrying its id (so replay re-pins it).
+  Entry favorite{"fav", 5};
+  favorite.id = std::string(64, 'f');  // compact emits PIN with this id
+  favorite.pinned = true;
+  Entry plain{"plain", 6};
+  {
+    Log log(path_);
+    log.compact({favorite, plain});
+  }
+  auto entries = replay_all();
+  ASSERT_EQ(entries.size(), 2u);  // both content records present
+
+  auto controls = replay_controls();
+  ASSERT_EQ(controls.size(), 1u);  // exactly one PIN, for the pinned entry
+  EXPECT_EQ(controls[0].first, ControlOp::Pin);
+  EXPECT_EQ(controls[0].second, std::string(64, 'f'));
 }
 
 }  // namespace

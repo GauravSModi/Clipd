@@ -314,4 +314,85 @@ TEST_F(CApiTest, StatsReportsStoreBytes) {
   clipd_destroy(core);
 }
 
+// --- Pinned / delete / clear over the C boundary ----------------------------
+
+// Fetch the id of the single search match for `query` (caller asserts count==1).
+static std::string only_match_id(ClipdCore* core, const char* query) {
+  ClipdResults* r = clipd_search(core, query, 10, 100);
+  std::string id = (r && r->count == 1) ? std::string(r->matches[0].id) : "";
+  clipd_free_results(r);
+  return id;
+}
+
+TEST_F(CApiTest, SetPinnedReflectedInSearchMatch) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "favorite", 1), 0);
+
+  std::string id = only_match_id(core, "favorite");
+  ASSERT_EQ(id.size(), 64u);
+  // Unpinned by default.
+  ClipdResults* before = clipd_search(core, "favorite", 10, 100);
+  ASSERT_EQ(before->count, 1u);
+  EXPECT_EQ(before->matches[0].pinned, 0);
+  clipd_free_results(before);
+
+  ASSERT_EQ(clipd_set_pinned(core, id.c_str(), 1), 0);
+
+  ClipdResults* after = clipd_search(core, "favorite", 10, 100);
+  ASSERT_EQ(after->count, 1u);
+  EXPECT_EQ(after->matches[0].pinned, 1);  // pinned field round-trips the arena
+  clipd_free_results(after);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, DeleteRemovesFromSearch) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "doomed", 1), 0);
+  ASSERT_EQ(clipd_add(core, "survivor", 2), 0);
+
+  std::string id = only_match_id(core, "doomed");
+  ASSERT_EQ(id.size(), 64u);
+  ASSERT_EQ(clipd_delete(core, id.c_str()), 0);
+
+  EXPECT_EQ(clipd_search(core, "doomed", 10, 100)->count, 0u);  // leak ok: ASan run
+  ClipdResults* r = clipd_search(core, "survivor", 10, 100);
+  EXPECT_EQ(r->count, 1u);
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, ClearKeepsPinned) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "fav", 1), 0);
+  std::string id = only_match_id(core, "fav");
+  ASSERT_EQ(clipd_set_pinned(core, id.c_str(), 1), 0);
+  ASSERT_EQ(clipd_add(core, "trash", 2), 0);
+
+  ASSERT_EQ(clipd_clear(core), 0);
+
+  ClipdResults* r = clipd_search(core, "", 10, 100);
+  ASSERT_EQ(r->count, 1u);          // only the pinned entry survives
+  EXPECT_STREQ(r->matches[0].text, "fav");
+  EXPECT_EQ(r->matches[0].pinned, 1);
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, PinDeleteClearNullArgsAreSafe) {
+  EXPECT_NE(clipd_set_pinned(nullptr, "id", 1), 0);
+  EXPECT_NE(clipd_delete(nullptr, "id"), 0);
+  EXPECT_NE(clipd_clear(nullptr), 0);
+
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  EXPECT_NE(clipd_set_pinned(core, nullptr, 1), 0);
+  EXPECT_NE(clipd_delete(core, nullptr), 0);
+  // A clear on an empty store is a valid no-op success.
+  EXPECT_EQ(clipd_clear(core), 0);
+  clipd_destroy(core);
+}
+
 }  // namespace

@@ -54,7 +54,9 @@ typedef enum {
  *   id    — sha256-hex identity; for an IMAGE it is also the blob key to pass to
  *           clipd_read_blob().
  *   byte_size — blob byte size (IMAGE) or text/path length, for display/quotas.
- *   width/height — image pixel dimensions (0 for non-image). */
+ *   width/height — image pixel dimensions (0 for non-image).
+ *   pinned — 1 if the entry is pinned (favorite), 0 otherwise. Pinned matches
+ *            sort first, so the shell can render them as a separate section. */
 typedef struct {
   const char* text;    /* NUL-terminated, owned by the ClipdResults block */
   const char* id;      /* NUL-terminated, owned by the ClipdResults block */
@@ -64,6 +66,7 @@ typedef struct {
   ClipdKind kind;
   uint32_t width;
   uint32_t height;
+  uint8_t pinned;      /* 1 = pinned/favorite, 0 = not */
 } ClipdMatch;
 
 /* A search result set: allocated as a single block by clipd_search() and freed
@@ -122,6 +125,29 @@ int clipd_add_image(ClipdCore* core, const uint8_t* data, size_t len,
  * not. Returns 0 on success, nonzero on failure.
  */
 int clipd_add_file(ClipdCore* core, const char* path, int64_t timestamp_ms);
+
+/*
+ * Pin (`pinned` != 0) or unpin (`pinned` == 0) the entry with `id` (a 64-char
+ * hex id from a ClipdMatch). Idempotent set-to-bool: setting the state it
+ * already has, or an unknown id, is a successful no-op. A pinned entry is exempt
+ * from eviction and from clipd_clear(). Returns 0 on success, nonzero on
+ * failure (e.g. a NULL argument).
+ */
+int clipd_set_pinned(ClipdCore* core, const char* id, int pinned);
+
+/*
+ * Delete the entry with `id`. For an image, the backing blob is reclaimed at the
+ * next compaction (not immediately). An unknown id is a successful no-op.
+ * Returns 0 on success, nonzero on failure (e.g. a NULL argument).
+ */
+int clipd_delete(ClipdCore* core, const char* id);
+
+/*
+ * Clear the history, KEEPING pinned entries. Rewrites the log to the pinned-only
+ * set and reclaims every now-unreferenced blob. Returns 0 on success, nonzero
+ * on failure.
+ */
+int clipd_clear(ClipdCore* core);
 
 /*
  * Fetch the bytes of the blob identified by `id` (an IMAGE match's `id`). On

@@ -31,6 +31,8 @@ struct Entry {
   uint32_t width = 0;           // image pixel dimensions (0 for non-image)
   uint32_t height = 0;
   ImageFormat image_format = ImageFormat::Png;
+  bool pinned = false;          // favorite: exempt from eviction; persisted via
+                                // PIN/UNPIN log records, never evicted while set.
 };
 
 }  // namespace clipd

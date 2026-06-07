@@ -85,6 +85,36 @@ int clipd_add_file(ClipdCore* core, const char* path, int64_t timestamp_ms) {
   }
 }
 
+int clipd_set_pinned(ClipdCore* core, const char* id, int pinned) {
+  if (!core || !id) return -1;
+  try {
+    core->core.set_pinned(id, pinned != 0);
+    return 0;
+  } catch (...) {
+    return -1;
+  }
+}
+
+int clipd_delete(ClipdCore* core, const char* id) {
+  if (!core || !id) return -1;
+  try {
+    core->core.remove(id);
+    return 0;
+  } catch (...) {
+    return -1;
+  }
+}
+
+int clipd_clear(ClipdCore* core) {
+  if (!core) return -1;
+  try {
+    core->core.clear();
+    return 0;
+  } catch (...) {
+    return -1;
+  }
+}
+
 const uint8_t* clipd_read_blob(ClipdCore* core, const char* id, size_t* out_len) {
   if (!core || !id || !out_len) return nullptr;
   try {
@@ -152,6 +182,7 @@ ClipdResults* clipd_search(ClipdCore* core, const char* query,
       results->matches[i].kind = to_c_kind(e.kind);
       results->matches[i].width = e.width;
       results->matches[i].height = e.height;
+      results->matches[i].pinned = e.pinned ? 1 : 0;
     }
     return results;
   } catch (...) {

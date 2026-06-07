@@ -62,4 +62,27 @@ final class HistoryControllerTests: XCTestCase {
         XCTAssertLessThan(try clip.stats().logBytes, 100,
                           "log should stay bounded — compaction must run during the session")
     }
+
+    func testSetPinnedDeleteClearPassThrough() throws {
+        let clip = try makeClipboard()
+        let pb = FakePasteboard()
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 })
+        let controller = HistoryController(clipboard: clip,
+                                           monitor: monitor,
+                                           compactThresholdBytes: 1_000_000,
+                                           now: { 2 })
+
+        pb.write("findme"); monitor.poll()
+        let id = try XCTUnwrap(controller.search("findme").first?.id)
+
+        try controller.setPinned(id, true)
+        XCTAssertTrue(try controller.search("findme").first!.pinned)
+
+        try controller.delete(id: id)
+        XCTAssertEqual(try controller.search("findme").count, 0)
+
+        pb.write("keepme"); monitor.poll()
+        try controller.clear()  // nothing pinned now → empties the history
+        XCTAssertEqual(try controller.search("").count, 0)
+    }
 }

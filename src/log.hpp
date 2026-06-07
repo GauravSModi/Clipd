@@ -9,6 +9,12 @@
 
 namespace clipd {
 
+// A control record: a state change keyed on an entry id, not a content entry.
+// Pin/Unpin/Tombstone carry the target id; Clear carries none. The record's
+// position in the log is its order — control records carry no timestamp and
+// never bump recency.
+enum class ControlOp : uint8_t { Pin, Unpin, Tombstone, Clear };
+
 // Crash-safe append-only log of clipboard entries.
 //
 // File layout (v1): a fixed header followed by length-framed records.
@@ -53,10 +59,19 @@ class Log {
   // Append one record for `e`, tagged by its kind.
   void append(const Entry& e);
 
+  // Append one control record (pin/unpin/tombstone keyed on `id`; clear takes
+  // no id). State change only — no content, no timestamp.
+  void append_control(ControlOp op, const std::string& id = "");
+
   // Replay valid records in file order (decoding v1 or legacy), truncating any
-  // torn tail in place. Yields each entry with its kind and on-disk fields; the
-  // caller derives id/label for non-image kinds.
-  void replay(const std::function<void(const Entry&)>& on_entry);
+  // torn tail in place. Content records are yielded to `on_entry` (with kind +
+  // on-disk fields; the caller derives id/label for non-image kinds); control
+  // records to `on_control` (pin/unpin/tombstone with the target id, clear with
+  // an empty id). Both are yielded strictly in file order so the caller can
+  // re-derive the live set chronologically.
+  void replay(const std::function<void(const Entry&)>& on_entry,
+              const std::function<void(ControlOp, const std::string&)>& on_control =
+                  {});
 
   // Rewrite the log to a v1 header plus exactly `live`, atomically replacing the
   // file.

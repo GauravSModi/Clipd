@@ -22,6 +22,11 @@ final class SearchModel: ObservableObject {
     /// Accessibility check, ⌘V synthesis) and the panel dismissal.
     var onActivate: ((Match, ClipdPasteAction) -> Void)?
 
+    /// Called to confirm deleting a *pinned* row before it happens (the app layer
+    /// owns the AppKit alert). On confirmation it calls back into performDelete.
+    /// Unpinned deletes are instant and never go through here.
+    var onConfirmDelete: ((Match) -> Void)?
+
     init(controller: HistoryController) {
         self.controller = controller
     }
@@ -58,6 +63,40 @@ final class SearchModel: ObservableObject {
 
     func choose(_ match: Match, _ action: ClipdPasteAction = .paste) {
         onActivate?(match, action)
+    }
+
+    /// Number of leading pinned results — the boundary the view uses to draw the
+    /// "Pinned" section (the core returns pinned matches as a contiguous prefix).
+    var pinnedCount: Int { clipdPinnedPrefixCount(results) }
+
+    /// Toggle the pin state of a row, then refresh (the row re-sorts into / out of
+    /// the pinned section).
+    func togglePin(_ match: Match) {
+        try? controller.setPinned(match.id, !match.pinned)
+        refresh()
+    }
+
+    /// Delete a row. Unpinned: instant. Pinned: route through the app layer's
+    /// confirmation, which calls performDelete on confirm.
+    func delete(_ match: Match) {
+        if match.pinned {
+            onConfirmDelete?(match)
+        } else {
+            performDelete(match)
+        }
+    }
+
+    /// Actually delete (after any confirmation) and refresh.
+    func performDelete(_ match: Match) {
+        try? controller.delete(id: match.id)
+        refresh()
+    }
+
+    /// Clear history (keeps pinned entries) and refresh. Confirmation is the app
+    /// layer's job before calling this.
+    func clearHistory() {
+        try? controller.clear()
+        refresh()
     }
 
     /// A bounded thumbnail for an image match, or nil for other kinds / missing

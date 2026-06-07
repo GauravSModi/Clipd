@@ -56,6 +56,21 @@ class Core {
   // Record a file copy by reference (its path), never by copying contents.
   void add_file(std::string path, int64_t timestamp);
 
+  // Pin/unpin the live entry with `id` (a 64-char hex id from a search match).
+  // Idempotent: a no-op (no log record) if absent or already in that state.
+  // Persisted via a PIN/UNPIN record applied in replay order.
+  void set_pinned(const std::string& id, bool pinned);
+
+  // Delete the live entry with `id`. Persisted via a TOMBSTONE record; replay
+  // drops it; compaction discards both the tombstone and the dead record. An
+  // image's blob is left orphaned and reclaimed by the next compaction's GC.
+  void remove(const std::string& id);
+
+  // Clear history, keeping pinned entries: append a CLEAR record (durable for
+  // the crash window), drop the unpinned live set, then compact to a pinned-only
+  // log and GC every now-unreferenced blob.
+  void clear();
+
   // The bytes of the blob with id `id`, or nullopt if absent.
   std::optional<std::string> read_blob(const std::string& id) const;
 

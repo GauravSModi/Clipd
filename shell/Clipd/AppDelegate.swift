@@ -49,6 +49,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model.onActivate = { [weak self] match, requested in
             self?.activate(match, requested: requested)
         }
+        model.onConfirmDelete = { [weak self] match in
+            self?.confirmDeletePinned(match)
+        }
 
         startPolling()
         setupStatusItem()
@@ -109,6 +112,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         launchAtLoginItem = statusMenu.addItem(withTitle: "Launch at Login",
                                                action: #selector(toggleLaunchAtLogin),
                                                keyEquivalent: "")
+        statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "Clear History…",
+                           action: #selector(clearHistory), keyEquivalent: "")
         statusMenu.addItem(.separator())
         statusMenu.addItem(withTitle: "Quit Clipd",
                            action: #selector(quit), keyEquivalent: "q")
@@ -179,6 +185,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Destructive actions (confirmed)
+
+    /// Clear history (keeping pinned entries) after a confirmation. Lives in the
+    /// status menu — a rare, global, irreversible action.
+    @objc private func clearHistory() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Clear clipboard history?"
+        alert.informativeText = "This removes all unpinned entries. Pinned entries are kept."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        model.clearHistory()
+    }
+
+    /// Confirm before deleting a *pinned* row (unpinned deletes are instant and
+    /// never reach here). Suppress the panel's focus-loss auto-dismiss while the
+    /// modal alert is up so the panel survives the confirmation.
+    private func confirmDeletePinned(_ match: Match) {
+        suppressAutoDismiss = true
+        defer { suppressAutoDismiss = false }
+        let alert = NSAlert()
+        alert.messageText = "Delete this pinned entry?"
+        alert.informativeText = "This favorite will be permanently removed."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        model.performDelete(match)
+        panel.makeKeyAndOrderFront(nil)
     }
 
     // MARK: - Search panel

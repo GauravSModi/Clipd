@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <list>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -38,6 +39,22 @@ class ClipStore {
   // until both the count and byte caps hold.
   void upsert(Entry e);
 
+  // Set the pinned flag of the entry with `id` (no-op if absent). Idempotent;
+  // does not bump recency. A pinned entry is exempt from eviction. Eviction is
+  // never triggered here — only upsert evicts — so replay stays faithful.
+  void set_pinned(const std::string& id, bool pinned);
+
+  // The pinned flag of the entry with `id`, or nullopt if there is no such
+  // entry. Lets the caller skip redundant writes for an idempotent set.
+  std::optional<bool> pinned_state(const std::string& id) const;
+
+  // Remove the entry with `id` (no-op if absent). Frees its byte cost; never
+  // touches blobs (blob reclamation is the Core's job at compaction).
+  void remove(const std::string& id);
+
+  // Remove every unpinned entry, keeping pinned ones (clear-history semantics).
+  void clear_unpinned();
+
   // Visit live entries most-recent-first.
   void for_each(const std::function<void(const Entry&)>& fn) const;
 
@@ -50,6 +67,14 @@ class ClipStore {
   uint64_t total_bytes() const { return total_bytes_; }
 
  private:
+  // Evict least-recent unpinned entries until both caps hold or nothing is
+  // evictable. Called only from upsert (so replay reproduces eviction exactly).
+  void evict();
+  // The least-recent (back-most) unpinned entry that is not the most-recent
+  // (front) one, or end() if none — pinned entries and the most-recent insert
+  // are never evicted.
+  std::list<Entry>::iterator least_recent_evictable();
+
   size_t max_entries_;
   uint64_t max_bytes_;
   uint64_t total_bytes_ = 0;

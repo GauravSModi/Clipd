@@ -19,10 +19,20 @@ constexpr size_t kHeaderSize = 8;       // 4-byte magic + uint32 version
 constexpr size_t kRecordHeaderSize = 8; // uint32 length + uint32 crc32
 constexpr size_t kTimestampSize = 8;    // int64 timestamp
 
-// Record type tags. Pin/unpin/tombstone/clear are reserved for feature 2.
+// Record type tags. 0-2 are content entries; 3-6 are control records (state
+// changes keyed on an id, no content) for pinned/favorites + delete + clear.
 constexpr uint8_t kTypeText = 0;
 constexpr uint8_t kTypeImage = 1;
 constexpr uint8_t kTypeFile = 2;
+constexpr uint8_t kTypePin = 3;
+constexpr uint8_t kTypeUnpin = 4;
+constexpr uint8_t kTypeTombstone = 5;
+constexpr uint8_t kTypeClear = 6;
+
+bool is_control_type(uint8_t type) {
+  return type == kTypePin || type == kTypeUnpin || type == kTypeTombstone ||
+         type == kTypeClear;
+}
 
 // Smallest valid v1 body sizes (excluding the variable tail).
 constexpr size_t kTextHeadSize = 1 + kTimestampSize;   // type + ts (+ text tail)
@@ -79,6 +89,30 @@ std::string encode_payload(const Entry& e) {
       break;
   }
   return body;
+}
+
+// Build a control record's payload ([type][id]); Clear carries no id.
+std::string encode_control(ControlOp op, const std::string& id) {
+  std::string body;
+  switch (op) {
+    case ControlOp::Pin:       put_u8(body, kTypePin);       body.append(id); break;
+    case ControlOp::Unpin:     put_u8(body, kTypeUnpin);     body.append(id); break;
+    case ControlOp::Tombstone: put_u8(body, kTypeTombstone); body.append(id); break;
+    case ControlOp::Clear:     put_u8(body, kTypeClear);                      break;
+  }
+  return body;
+}
+
+// Decode a control payload into (op, id). Returns false for an unknown tag.
+bool decode_control(const char* p, size_t len, ControlOp& op, std::string& id) {
+  if (len < 1) return false;
+  switch (static_cast<uint8_t>(p[0])) {
+    case kTypePin:       op = ControlOp::Pin;       id.assign(p + 1, len - 1); return true;
+    case kTypeUnpin:     op = ControlOp::Unpin;     id.assign(p + 1, len - 1); return true;
+    case kTypeTombstone: op = ControlOp::Tombstone; id.assign(p + 1, len - 1); return true;
+    case kTypeClear:     op = ControlOp::Clear;     id.clear();                return true;
+    default:             return false;
+  }
 }
 
 // Frame a payload: [length][crc32][payload].
@@ -178,7 +212,21 @@ void Log::append(const Entry& e) {
   }
 }
 
-void Log::replay(const std::function<void(const Entry&)>& on_entry) {
+void Log::append_control(ControlOp op, const std::string& id) {
+  std::ofstream f(path_, std::ios::binary | std::ios::app);
+  if (!f) {
+    throw std::runtime_error("clipd: cannot open log for append: " +
+                             path_.string());
+  }
+  std::string record = frame_record(encode_control(op, id));
+  f.write(record.data(), static_cast<std::streamsize>(record.size()));
+  if (!f) {
+    throw std::runtime_error("clipd: failed to append to log: " + path_.string());
+  }
+}
+
+void Log::replay(const std::function<void(const Entry&)>& on_entry,
+                 const std::function<void(ControlOp, const std::string&)>& on_control) {
   const std::string buf = read_file(path_);
   const bool v1 = starts_with_magic(buf);
   size_t pos = v1 ? kHeaderSize : 0;
@@ -193,17 +241,28 @@ void Log::replay(const std::function<void(const Entry&)>& on_entry) {
     const char* payload = buf.data() + payload_start;
     if (crc32(std::string_view(payload, length)) != stored_crc) break;
 
-    Entry e;
-    if (v1) {
-      if (!decode_v1_payload(payload, length, e)) break;
+    // v1 control records (pin/unpin/tombstone/clear) dispatch to on_control;
+    // everything else (and all legacy records) is a content entry. Both paths
+    // fire in strict file order so the caller re-derives the live set
+    // chronologically.
+    if (v1 && length >= 1 && is_control_type(static_cast<uint8_t>(payload[0]))) {
+      ControlOp op;
+      std::string id;
+      if (!decode_control(payload, length, op, id)) break;
+      if (on_control) on_control(op, id);
     } else {
-      // Legacy v0: untagged payload = [int64 timestamp][text].
-      if (length < kTimestampSize) break;
-      e.kind = Kind::Text;
-      e.timestamp = get_i64(payload);
-      e.text.assign(payload + kTimestampSize, length - kTimestampSize);
+      Entry e;
+      if (v1) {
+        if (!decode_v1_payload(payload, length, e)) break;
+      } else {
+        // Legacy v0: untagged payload = [int64 timestamp][text].
+        if (length < kTimestampSize) break;
+        e.kind = Kind::Text;
+        e.timestamp = get_i64(payload);
+        e.text.assign(payload + kTimestampSize, length - kTimestampSize);
+      }
+      on_entry(e);
     }
-    on_entry(e);
 
     pos = payload_start + length;
     valid_end = pos;
@@ -226,6 +285,13 @@ void Log::compact(const std::vector<Entry>& live) {
     for (const Entry& e : live) {
       std::string record = frame_record(encode_payload(e));
       f.write(record.data(), static_cast<std::streamsize>(record.size()));
+      // Pinned state survives compaction by re-emitting a PIN record after the
+      // entry's content record (the content schema stays unchanged; replay
+      // re-derives the same id and re-pins it).
+      if (e.pinned) {
+        std::string pin = frame_record(encode_control(ControlOp::Pin, e.id));
+        f.write(pin.data(), static_cast<std::streamsize>(pin.size()));
+      }
     }
     f.flush();
   }

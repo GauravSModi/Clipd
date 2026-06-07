@@ -439,4 +439,163 @@ TEST_F(CoreTest, PerImageCapSkipsOversizeImages) {
       core.read_blob(clipd::content_id(Kind::Image, "small")).has_value());
 }
 
+// --- Pinned / delete / clear ------------------------------------------------
+
+TEST_F(CoreTest, SetPinnedPersistsAcrossRestart) {
+  std::string id = clipd::content_id(Kind::Text, "fav");
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    core.add("fav", 1);
+    core.set_pinned(id, true);
+    auto f = find_by_id(core, id, 10);
+    ASSERT_TRUE(f.has_value());
+    EXPECT_TRUE(f->entry.pinned);
+  }
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  auto f = find_by_id(reopened, id, 10);
+  ASSERT_TRUE(f.has_value());
+  EXPECT_TRUE(f->entry.pinned);  // PIN record replayed
+}
+
+// The interleaving guarantee: PIN must be applied at its log position, before
+// the later adds that would otherwise evict the entry. If replay batched all
+// adds before controls, "keep" would be evicted before being pinned.
+TEST_F(CoreTest, PinnedSurvivesEvictionPressureAcrossRestart) {
+  std::string pid = clipd::content_id(Kind::Text, "keep");
+  {
+    Core core(path_, /*max_entries=*/3, kNoAutoCompact);
+    core.start();
+    core.add("keep", 1);
+    core.set_pinned(pid, true);
+    for (int i = 0; i < 10; ++i) core.add("u" + std::to_string(i), 10 + i);
+  }
+  Core reopened(path_, 3, kNoAutoCompact);
+  reopened.start();
+  auto f = find_by_id(reopened, pid, 100);
+  ASSERT_TRUE(f.has_value());
+  EXPECT_TRUE(f->entry.pinned);
+}
+
+TEST_F(CoreTest, LaterPinUnpinWinsAcrossRestart) {
+  std::string id = clipd::content_id(Kind::Text, "x");
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    core.add("x", 1);
+    core.set_pinned(id, true);
+    core.set_pinned(id, false);  // later UNPIN wins
+  }
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  auto f = find_by_id(reopened, id, 10);
+  ASSERT_TRUE(f.has_value());
+  EXPECT_FALSE(f->entry.pinned);
+}
+
+TEST_F(CoreTest, DeletePersistsAcrossRestart) {
+  std::string id = clipd::content_id(Kind::Text, "doomed");
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    core.add("doomed", 1);
+    core.add("survivor", 2);
+    core.remove(id);
+    EXPECT_FALSE(contains(core, "doomed", 10));
+  }
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  EXPECT_FALSE(contains(reopened, "doomed", 10));  // TOMBSTONE replayed
+  EXPECT_TRUE(contains(reopened, "survivor", 10));
+}
+
+TEST_F(CoreTest, DeletedEntryNotResurrectedAfterCompaction) {
+  std::string id = clipd::content_id(Kind::Text, "doomed");
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add("doomed", 1);
+  core.add("survivor", 2);
+  core.remove(id);
+  core.compact();  // tombstone + dead record both dropped from the compacted log
+  EXPECT_FALSE(contains(core, "doomed", 10));
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  EXPECT_FALSE(contains(reopened, "doomed", 10));
+  EXPECT_TRUE(contains(reopened, "survivor", 10));
+}
+
+// The orphan-blob handoff: remove() leaves an image's blob on disk; the next
+// compaction's existing GC reclaims it (no targeted delete on remove).
+TEST_F(CoreTest, DeletedImageBlobReclaimedAtNextCompaction) {
+  std::string id = clipd::content_id(Kind::Image, "IMGX");
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  add_image(core, "IMGX", 2, 2, ImageFormat::Png, 1);
+  core.remove(id);
+  EXPECT_TRUE(core.read_blob(id).has_value());   // blob deferred, still on disk
+  core.compact();
+  EXPECT_FALSE(core.read_blob(id).has_value());  // reclaimed by compaction GC
+}
+
+TEST_F(CoreTest, ClearKeepsPinnedAcrossRestart) {
+  std::string pid = clipd::content_id(Kind::Text, "fav");
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    core.add("fav", 1);
+    core.set_pinned(pid, true);
+    core.add("trash1", 2);
+    core.add("trash2", 3);
+    core.clear();
+    EXPECT_TRUE(contains(core, "fav", 10));
+    EXPECT_FALSE(contains(core, "trash1", 10));
+    EXPECT_FALSE(contains(core, "trash2", 10));
+  }
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  EXPECT_TRUE(contains(reopened, "fav", 10));
+  EXPECT_FALSE(contains(reopened, "trash1", 10));
+  auto f = find_by_id(reopened, pid, 10);
+  ASSERT_TRUE(f.has_value());
+  EXPECT_TRUE(f->entry.pinned);  // still pinned after clear + restart
+}
+
+TEST_F(CoreTest, ClearThenAddWorks) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add("old", 1);
+  core.clear();
+  core.add("fresh", 2);
+  EXPECT_FALSE(contains(core, "old", 10));
+  EXPECT_TRUE(contains(core, "fresh", 10));
+}
+
+TEST_F(CoreTest, SetPinnedAndDeleteUnknownIdAreNoOps) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add("a", 1);
+  std::string ghost(64, '0');
+  core.set_pinned(ghost, true);  // no entry, no crash
+  core.remove(ghost);            // no entry, no crash
+  EXPECT_EQ(core.stats().entry_count, 1u);
+  EXPECT_TRUE(contains(core, "a", 10));
+}
+
+// Pinned-first ordering lives in Core::search's comparator: a pinned entry must
+// surface even when recency would otherwise bury it past max_results.
+TEST_F(CoreTest, SearchReturnsPinnedMatchesFirst) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  std::string oldid = clipd::content_id(Kind::Text, "alpha");
+  core.add("alpha", 1);  // oldest
+  for (int i = 0; i < 20; ++i) core.add("alpha" + std::to_string(i), 10 + i);
+  core.set_pinned(oldid, true);
+
+  auto results = core.search("alpha", 3, 1000);
+  ASSERT_FALSE(results.empty());
+  EXPECT_EQ(results[0].entry.id, oldid);  // pinned old entry ranks first
+  EXPECT_TRUE(results[0].entry.pinned);
+}
+
 }  // namespace

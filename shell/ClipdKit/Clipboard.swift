@@ -39,10 +39,11 @@ public struct Match: Equatable {
     public let byteSize: UInt64
     public let width: UInt32
     public let height: UInt32
+    public let pinned: Bool        // favorite: rendered in the pinned section
 
     public init(text: String, timestamp: Int64, score: Float, id: String = "",
                 kind: ClipKind = .text, byteSize: UInt64 = 0, width: UInt32 = 0,
-                height: UInt32 = 0) {
+                height: UInt32 = 0, pinned: Bool = false) {
         self.text = text
         self.id = id
         self.timestamp = timestamp
@@ -51,6 +52,7 @@ public struct Match: Equatable {
         self.byteSize = byteSize
         self.width = width
         self.height = height
+        self.pinned = pinned
     }
 }
 
@@ -73,6 +75,7 @@ public enum ClipdError: Error {
     case searchFailed
     case statsFailed
     case compactFailed
+    case mutationFailed
 }
 
 public final class Clipboard {
@@ -127,6 +130,30 @@ public final class Clipboard {
         }
     }
 
+    /// Pin/unpin the entry `id` (idempotent set-to-bool). A pinned entry is
+    /// exempt from eviction and from clear().
+    public func setPinned(_ id: String, _ pinned: Bool) throws {
+        try queue.sync {
+            if clipd_set_pinned(core, id, pinned ? 1 : 0) != 0 {
+                throw ClipdError.mutationFailed
+            }
+        }
+    }
+
+    /// Delete the entry `id`. An image's blob is reclaimed at the next compaction.
+    public func delete(id: String) throws {
+        try queue.sync {
+            if clipd_delete(core, id) != 0 { throw ClipdError.mutationFailed }
+        }
+    }
+
+    /// Clear history, keeping pinned entries (rewrites the log to pinned-only).
+    public func clear() throws {
+        try queue.sync {
+            if clipd_clear(core) != 0 { throw ClipdError.mutationFailed }
+        }
+    }
+
     /// Fetch the bytes of the blob `id` (an image Match's id), copied out of C++
     /// memory. Returns nil if the blob is missing.
     public func readBlob(id: String) -> Data? {
@@ -167,7 +194,8 @@ public final class Clipboard {
                              kind: kind,
                              byteSize: match.byte_size,
                              width: match.width,
-                             height: match.height)
+                             height: match.height,
+                             pinned: match.pinned != 0)
             }
         }
     }

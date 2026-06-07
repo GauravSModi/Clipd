@@ -159,3 +159,111 @@ TEST(ClipStore, DefaultConstructionHasNoByteCap) {
   ClipStore s(10);  // single-arg ctor: count cap only
   EXPECT_EQ(s.max_bytes(), 0u);
 }
+
+// --- Pinned: exemption from eviction ---------------------------------------
+
+TEST(ClipStore, PinnedStateReportsValueOrNulloptForMissing) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1));
+  EXPECT_EQ(s.pinned_state("a"), std::optional<bool>(false));
+  EXPECT_EQ(s.pinned_state("missing"), std::nullopt);
+}
+
+TEST(ClipStore, SetPinnedIsIdempotentAndNoOpOnUnknownId) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1));
+  s.set_pinned("a", true);
+  s.set_pinned("a", true);  // idempotent
+  EXPECT_EQ(s.pinned_state("a"), std::optional<bool>(true));
+  s.set_pinned("ghost", true);  // unknown id: no crash, no entry created
+  EXPECT_EQ(s.pinned_state("ghost"), std::nullopt);
+  EXPECT_EQ(s.size(), 1u);
+}
+
+TEST(ClipStore, SetPinnedDoesNotBumpRecency) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1));
+  s.upsert(mk("b", 2));
+  s.set_pinned("a", true);  // flips a flag; must not move "a" to most-recent
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"b", "a"}));
+}
+
+TEST(ClipStore, PinnedExemptFromCountEviction) {
+  ClipStore s(2);  // count cap 2
+  s.upsert(mk("a", 1));
+  s.upsert(mk("b", 2));
+  s.set_pinned("a", true);  // pin the oldest
+  s.upsert(mk("c", 3));     // over cap: evict least-recent UNPINNED ("b"), not "a"
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"c", "a"}));
+}
+
+TEST(ClipStore, PinnedExemptFromByteEviction) {
+  ClipStore s(/*max_entries=*/0, /*max_bytes=*/100);
+  s.upsert(mk("a", 1, 40));
+  s.upsert(mk("b", 2, 40));
+  s.set_pinned("a", true);
+  s.upsert(mk("c", 3, 40));  // total 120 > 100: evict least-recent unpinned ("b")
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"c", "a"}));
+  EXPECT_EQ(s.total_bytes(), 80u);
+}
+
+TEST(ClipStore, PinnedNeverEvictedEvenWhenLeastRecent) {
+  ClipStore s(3);
+  s.upsert(mk("p", 1));
+  s.set_pinned("p", true);  // pinned + will become the least-recent
+  for (int i = 0; i < 10; ++i) s.upsert(mk("u" + std::to_string(i), 10 + i));
+  // "p" survives; the cap holds (pins occupy a slot, so 2 unpinned remain).
+  EXPECT_EQ(s.size(), 3u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"u9", "u8", "p"}));
+}
+
+TEST(ClipStore, AllPinnedOverCapTerminates) {
+  ClipStore s(2);
+  s.upsert(mk("a", 1)); s.set_pinned("a", true);
+  s.upsert(mk("b", 2)); s.set_pinned("b", true);
+  s.upsert(mk("c", 3)); s.set_pinned("c", true);  // size 3 > cap, all pinned: no evict
+  EXPECT_EQ(s.size(), 3u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"c", "b", "a"}));
+}
+
+// The begin()-guard edge: byte cap exceeded, everything pinned EXCEPT a single
+// just-inserted unpinned entry at the front. That most-recent entry is the only
+// eviction candidate, but it must be protected (never evict the most-recent).
+TEST(ClipStore, ByteCapDoesNotEvictTheLoneMostRecentUnpinnedAmongPins) {
+  ClipStore s(/*max_entries=*/0, /*max_bytes=*/100);
+  s.upsert(mk("p1", 1, 60)); s.set_pinned("p1", true);
+  s.upsert(mk("p2", 2, 60)); s.set_pinned("p2", true);  // 120 > 100, both pinned: kept
+  s.upsert(mk("u", 3, 60));  // 180 > 100; only "u" is unpinned, but it is begin()
+  EXPECT_EQ(s.size(), 3u);   // nothing evictable: u protected, p1/p2 pinned
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"u", "p2", "p1"}));
+}
+
+// --- Remove + clear ---------------------------------------------------------
+
+TEST(ClipStore, RemoveDropsEntryAndFreesBytes) {
+  ClipStore s(/*max_entries=*/0, /*max_bytes=*/0);
+  s.upsert(mk("a", 1, 10));
+  s.upsert(mk("b", 2, 20));
+  s.remove("a");
+  EXPECT_EQ(s.size(), 1u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"b"}));
+  EXPECT_EQ(s.total_bytes(), 20u);
+}
+
+TEST(ClipStore, RemoveUnknownIdIsNoOp) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1));
+  s.remove("nonexistent");
+  EXPECT_EQ(s.size(), 1u);
+}
+
+TEST(ClipStore, ClearUnpinnedKeepsPinned) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1, 5));
+  s.upsert(mk("b", 2, 7)); s.set_pinned("b", true);
+  s.upsert(mk("c", 3, 9));
+  s.clear_unpinned();
+  EXPECT_EQ(s.size(), 1u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"b"}));
+  EXPECT_EQ(s.total_bytes(), 7u);  // only the pinned entry's bytes remain
+}

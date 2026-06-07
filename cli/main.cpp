@@ -54,6 +54,10 @@ std::string read_file_bytes(const std::string& path) {
       "  add-image <path> [--width N] [--height N] [--format png|tiff]\n"
       "                                capture a file's bytes as an image\n"
       "  read-blob <id>                write a blob's bytes to stdout\n"
+      "  pin <id>                      pin (favorite) an entry by id\n"
+      "  unpin <id>                    unpin an entry by id\n"
+      "  delete <id>                   delete an entry by id\n"
+      "  clear                         clear history, keeping pinned entries\n"
       "  search \"<query>\" [--max N] [--now <ms>]\n"
       "  list [--max N]                show N most-recent entries\n"
       "  compact                       rewrite the log to the live set\n"
@@ -75,10 +79,12 @@ std::optional<std::string> take_flag(std::vector<std::string>& args,
   return std::nullopt;
 }
 
+// Columns: timestamp, kind, pinned (1/0), id, score, text.
 void print_results(const std::vector<clipd::ScoredEntry>& results) {
   for (const auto& r : results) {
     std::cout << r.entry.timestamp << '\t' << kind_str(r.entry.kind) << '\t'
-              << r.entry.id << '\t' << r.score << '\t' << r.entry.text << '\n';
+              << (r.entry.pinned ? 1 : 0) << '\t' << r.entry.id << '\t' << r.score
+              << '\t' << r.entry.text << '\n';
   }
 }
 
@@ -135,6 +141,26 @@ int main(int argc, char** argv) {
       return 1;
     }
     std::cout.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
+    return 0;
+  }
+
+  if (command == "pin" || command == "unpin") {
+    if (args.empty()) usage();
+    core.start();
+    core.set_pinned(args[0], command == "pin");
+    return 0;
+  }
+
+  if (command == "delete") {
+    if (args.empty()) usage();
+    core.start();
+    core.remove(args[0]);
+    return 0;
+  }
+
+  if (command == "clear") {
+    core.start();
+    core.clear();
     return 0;
   }
 

@@ -46,24 +46,45 @@ struct SearchView: View {
     }
 
     private func resultsList(now: Int64) -> some View {
-        ScrollViewReader { proxy in
+        let pinnedCount = model.pinnedCount
+        let total = model.results.count
+        return ScrollViewReader { proxy in
             List {
-                ForEach(Array(model.results.enumerated()), id: \.offset) { index, match in
-                    row(match, now: now)
-                        .id(index)
-                        .contentShape(Rectangle())
-                        .listRowBackground(index == model.selectedIndex
-                                           ? Color.accentColor.opacity(0.20)
-                                           : Color.clear)
-                        .onTapGesture {
-                            // ⌘-click copies only; a plain click pastes back.
-                            let copy = NSEvent.modifierFlags.contains(.command)
-                            model.choose(match, copy ? .copy : .paste)
+                if pinnedCount > 0 {
+                    Section(header: Text("Pinned")) {
+                        rows(in: 0..<pinnedCount, now: now)
+                    }
+                    if pinnedCount < total {
+                        Section(header: Text("Recent")) {
+                            rows(in: pinnedCount..<total, now: now)
                         }
+                    }
+                } else {
+                    rows(in: 0..<total, now: now)
                 }
             }
             .listStyle(.plain)
             .onChange(of: model.selectedIndex) { proxy.scrollTo($0, anchor: .center) }
+        }
+    }
+
+    /// Render rows for a flat index range into `model.results`. Indices stay flat
+    /// (across both sections) so keyboard selection and ⌘1–9 are unaffected.
+    @ViewBuilder
+    private func rows(in range: Range<Int>, now: Int64) -> some View {
+        ForEach(range, id: \.self) { index in
+            let match = model.results[index]
+            row(match, now: now)
+                .id(index)
+                .contentShape(Rectangle())
+                .listRowBackground(index == model.selectedIndex
+                                   ? Color.accentColor.opacity(0.20)
+                                   : Color.clear)
+                .onTapGesture {
+                    // ⌘-click copies only; a plain click pastes back.
+                    let copy = NSEvent.modifierFlags.contains(.command)
+                    model.choose(match, copy ? .copy : .paste)
+                }
         }
     }
 
@@ -85,10 +106,36 @@ struct SearchView: View {
             if match.kind == .text {
                 affordance(for: match.text)
             }
+            pinButton(match)
+            deleteButton(match)
         }
         .help(clipdAbsoluteTime(fromEpochMs: match.timestamp))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(match.text), copied \(clipdAbsoluteTime(fromEpochMs: match.timestamp))")
+    }
+
+    /// Star toggle: pins / unpins the row (its own hit target, so it doesn't fire
+    /// the row's tap-to-paste). The row re-sorts into the Pinned section on pin.
+    private func pinButton(_ match: Match) -> some View {
+        Button { model.togglePin(match) } label: {
+            Image(systemName: match.pinned ? "star.fill" : "star")
+                .foregroundStyle(match.pinned ? Color.accentColor : .secondary)
+        }
+        .buttonStyle(.borderless)
+        .help(match.pinned ? "Unpin" : "Pin")
+        .accessibilityLabel(match.pinned ? "Unpin" : "Pin")
+    }
+
+    /// Per-row delete. Unpinned deletes are instant; deleting a pinned row goes
+    /// through the app layer's confirmation (SearchModel.delete decides).
+    private func deleteButton(_ match: Match) -> some View {
+        Button { model.delete(match) } label: {
+            Image(systemName: "trash")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.borderless)
+        .help("Delete")
+        .accessibilityLabel("Delete")
     }
 
     /// A leading icon per kind: an ImageIO-downsampled thumbnail for images, the

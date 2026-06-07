@@ -35,6 +35,20 @@ public final class HistoryController {
         clipboard.readBlob(id: id)
     }
 
+    /// Pin/unpin, delete, and clear — thin passthroughs to the core (the policy,
+    /// durability, and serialization all live below in Clipboard/the C++ core).
+    public func setPinned(_ id: String, _ pinned: Bool) throws {
+        try clipboard.setPinned(id, pinned)
+    }
+
+    public func delete(id: String) throws {
+        try clipboard.delete(id: id)
+    }
+
+    public func clear() throws {
+        try clipboard.clear()
+    }
+
     private func ingest(_ capture: Capture, at timestamp: Int64) {
         // A failed write leaves the store unchanged (the core makes each add
         // atomic); we don't crash the app over one dropped copy.

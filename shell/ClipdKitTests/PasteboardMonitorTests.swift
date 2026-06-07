@@ -93,20 +93,41 @@ final class PasteboardMonitorTests: XCTestCase {
         XCTAssertEqual(captured, [.text("rich text")])
     }
 
-    func testImageWinsOverFileWhenNoText() throws {
+    func testFileWinsOverImageWhenFileURLPresent() throws {
+        // A copied file (even an image file) carries a file URL plus an icon/
+        // thumbnail image; we want the FILE, not the icon. File beats image.
         let pb = FakePasteboard()
         let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 })
         var captured: [Capture] = []
         monitor.onCapture = { c, _ in captured.append(c) }
 
-        let img = ImageCapture(data: Data([9]), width: 2, height: 2, format: .tiff)
-        pb.image = img
+        pb.image = ImageCapture(data: Data([9]), width: 2, height: 2, format: .tiff)
         pb.filePath = "/tmp/x"
         pb.types = ["public.tiff", "public.file-url"]
         pb.changeCount += 1
         monitor.poll()
 
-        XCTAssertEqual(captured, [.image(img)])
+        XCTAssertEqual(captured, [.file(path: "/tmp/x")])
+    }
+
+    func testFinderFileCopyIsCapturedAsFileNotFilenameText() throws {
+        // Regression: a real Finder ⌘C puts the file URL AND the filename string
+        // AND the file's icon (tiff). Text-first priority used to grab the
+        // filename and store the copy as text; a file copy must be captured as a
+        // FILE so paste-back yields the file, not its name.
+        let pb = FakePasteboard()
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 })
+        var captured: [Capture] = []
+        monitor.onCapture = { c, _ in captured.append(c) }
+
+        pb.content = "Resume - Gaurav Modi.pdf"   // the filename string Finder adds
+        pb.image = ImageCapture(data: Data([1, 2, 3]), width: 32, height: 32, format: .tiff)  // the icon
+        pb.filePath = "/Users/me/Resume - Gaurav Modi.pdf"
+        pb.types = ["public.file-url", "public.utf8-plain-text", "public.tiff"]
+        pb.changeCount += 1
+        monitor.poll()
+
+        XCTAssertEqual(captured, [.file(path: "/Users/me/Resume - Gaurav Modi.pdf")])
     }
 
     func testSkipsConcealedType() throws {

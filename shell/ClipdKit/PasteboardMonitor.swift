@@ -75,9 +75,11 @@ public final class PasteboardMonitor {
     /// One poll tick: if the pasteboard changed, read and (unless excluded) emit.
     /// Returns true iff a copy was emitted. The timer just calls this repeatedly.
     ///
-    /// Priority is text → image → file: a copy carrying both text and an image
-    /// (e.g. rich text with an inline image) is stored as text, which is the more
-    /// searchable representation.
+    /// Priority is file → text → image. A copied file must be checked FIRST: a
+    /// Finder file copy also puts the filename on the pasteboard as plain text
+    /// (and the icon as an image), so a text-first check would store the file as
+    /// just its name. Text still beats image so rich text with an inline image is
+    /// stored as text (the more searchable representation).
     @discardableResult
     public func poll() -> Bool {
         let current = pasteboard.changeCount
@@ -86,16 +88,16 @@ public final class PasteboardMonitor {
 
         guard !pasteboard.types.contains(where: Self.excludedTypes.contains) else { return false }
 
+        if let path = pasteboard.fileURLPath(), !path.isEmpty {
+            emit(.file(path: path))
+            return true
+        }
         if let text = pasteboard.string(), !text.isEmpty {
             emit(.text(text))
             return true
         }
         if let image = pasteboard.imageCapture() {
             emit(.image(image))
-            return true
-        }
-        if let path = pasteboard.fileURLPath(), !path.isEmpty {
-            emit(.file(path: path))
             return true
         }
         return false

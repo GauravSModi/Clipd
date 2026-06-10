@@ -192,6 +192,12 @@ this scale; an index becomes worthwhile around ~1M entries (see *Limitations*).
   a plaintext content-addressed blob store on disk (`<log>.blobs/<id>`). That
   filter is the floor, **not** security: encryption-at-rest is Future Work, and
   the store is **not** secure today.
+- **Apple's Passwords app can't be reliably excluded.** `ConcealedType` is a
+  third-party convention (1Password, Chrome, Bitwarden honor it); Apple's
+  Passwords app / Keychain copy a password as a bare plain-text string with no
+  marker. As a best-effort fallback, copies made while a known secret app is
+  frontmost (`com.apple.Passwords`, Keychain Access) are skipped — but that's a
+  source-app heuristic with a brief timing race, not security.
 - **Files are captured by reference, not by value.** A file copy stores its path
   only; if the file is moved or deleted before paste-back, the reference points
   nowhere. Image bytes, by contrast, are captured in full (their pasteboard

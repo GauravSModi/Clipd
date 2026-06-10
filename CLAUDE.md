@@ -160,6 +160,14 @@ xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
   floor, not security; encryption-at-rest is **Future Work**. The store is not
   secure today — say so. This now includes **plaintext image blobs** in
   `<log>.blobs/` (worse for sensitive images than short text).
+- **Concealed-skip only catches apps that tag copies.** `ConcealedType`/
+  `TransientType` is the third-party nspasteboard convention (1Password, Chrome,
+  Bitwarden honor it). **Apple's Passwords app / Keychain do NOT tag** — a copied
+  password is a bare `public.utf8-plain-text` string. The fallback skips copies
+  made while a known secret app is frontmost (`excludedSourceApps` in
+  `PasteboardMonitor`: `com.apple.Passwords`, `com.apple.keychainaccess`) — a
+  source-app heuristic with a ~0.5s poll race, **not** security. Don't overclaim
+  it; the real fix is encryption-at-rest.
 - **Files captured by reference, not value.** A file copy stores its path only;
   a moved/deleted file can't be pasted back. Document the caveat; don't
   silently switch to copying contents.

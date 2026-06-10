@@ -66,9 +66,11 @@ For the target scale (10k–50k short entries), a linear subsequence scan is com
 **Scale note for context:** linear scan stays imperceptible to ~50k entries. At ~1M entries it degrades to roughly 30–100ms per keystroke (bottlenecked by memory bandwidth and cache misses, not raw comparisons), which is where an index becomes worthwhile — see Future Work.
 
 ## Pasteboard security
-"Capture every text copy" must have a hard exception for sensitive data. Password managers (1Password, Keychain, Bitwarden, etc.) tag copied secrets with `org.nspasteboard.ConcealedType` and transient data with `org.nspasteboard.TransientType`. The Swift shell must inspect pasteboard types and skip ingesting anything carrying these markers — otherwise passwords land in a plaintext C++ log on disk, which is a severe security hole.
+"Capture every text copy" must have a hard exception for sensitive data. Many password managers (1Password, Bitwarden, Chrome/Google Password Manager, etc.) tag copied secrets with `org.nspasteboard.ConcealedType` and transient data with `org.nspasteboard.TransientType`. The Swift shell inspects pasteboard types and skips ingesting anything carrying these markers — otherwise passwords land in a plaintext C++ log on disk, which is a severe security hole.
 
-Honest framing for v1: concealed/transient exclusion is the **floor**, not full security. Arbitrary private text still gets written to a plaintext log. Encryption-at-rest is explicitly deferred to Future Work, and the README should say so rather than implying the store is secure.
+> **Correction (2026-06-09).** This convention is **not universal** — it's the third-party nspasteboard.com standard. **Apple's own Passwords app (and Keychain) do NOT set `ConcealedType`**: a copied password arrives as a bare `public.utf8-plain-text` string, indistinguishable from any other text copy. Verified by inspecting the live pasteboard. As a best-effort fallback the monitor also skips copies made while a known secret app is **frontmost** (`com.apple.Passwords`, `com.apple.keychainaccess`). This is a source-app heuristic, not security: it has a small timing race (copy then switch apps within the ~0.5s poll could slip through) and only covers the hardcoded apps.
+
+Honest framing for v1: concealed/transient exclusion (plus the source-app fallback) is the **floor**, not full security. Arbitrary private text still gets written to a plaintext log. Encryption-at-rest is explicitly deferred to Future Work, and the README should say so rather than implying the store is secure.
 
 ## C API memory model
 The inviolable rule: **C++ owns both allocation and free; Swift never frees C++ memory directly.** Swift and C++ may use different allocators, so freeing across the boundary is undefined behavior.

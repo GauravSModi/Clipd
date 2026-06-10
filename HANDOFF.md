@@ -73,7 +73,11 @@ swift test
     images come through `imageCapture()` (PNG/TIFF data + dims + format) and
     files through `fileURLPath()` on the `PasteboardReading` protocol;
     `SystemPasteboard` is the real adapter and also exposes `writeImage` /
-    `writeFile` for paste-back.
+    `writeFile` for paste-back. Concealed skip has two layers (2026-06-09):
+    the `ConcealedType`/`TransientType` type filter, **plus** a source-app skip
+    (`excludedSourceApps` + an injected `frontmostBundleID`) because Apple's
+    Passwords app copies a bare plain-text string with no marker — best-effort,
+    not security (a ~0.5s poll race; only the listed bundle ids).
   - `HistoryController` — ingest glue + in-session compaction past the threshold;
     `readBlob(id:)` passes blob fetches through to the UI.
   - `RelativeTime` — pure `clipdRelativeTime`/`clipdAbsoluteTime` formatters for

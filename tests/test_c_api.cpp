@@ -356,7 +356,9 @@ TEST_F(CApiTest, DeleteRemovesFromSearch) {
   ASSERT_EQ(id.size(), 64u);
   ASSERT_EQ(clipd_delete(core, id.c_str()), 0);
 
-  EXPECT_EQ(clipd_search(core, "doomed", 10, 100)->count, 0u);  // leak ok: ASan run
+  ClipdResults* gone = clipd_search(core, "doomed", 10, 100);
+  EXPECT_EQ(gone->count, 0u);
+  clipd_free_results(gone);
   ClipdResults* r = clipd_search(core, "survivor", 10, 100);
   EXPECT_EQ(r->count, 1u);
   clipd_free_results(r);

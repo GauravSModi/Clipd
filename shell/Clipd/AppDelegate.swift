@@ -41,7 +41,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return
         }
         self.clipboard = clipboard
-        monitor = PasteboardMonitor(pasteboard: SystemPasteboard())
+        monitor = PasteboardMonitor(
+            pasteboard: SystemPasteboard(),
+            frontmostBundleID: { NSWorkspace.shared.frontmostApplication?.bundleIdentifier })
         controller = HistoryController(clipboard: clipboard,
                                        monitor: monitor,
                                        compactThresholdBytes: compactThresholdBytes)

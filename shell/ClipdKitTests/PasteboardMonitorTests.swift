@@ -155,6 +155,36 @@ final class PasteboardMonitorTests: XCTestCase {
         XCTAssertEqual(captured, [])
     }
 
+    func testSkipsCopyFromExcludedSourceApp() throws {
+        // The macOS Passwords app copies a password as plain text with NO
+        // ConcealedType marker, so the type filter can't catch it. As a
+        // best-effort fallback, a copy made while a known secret app is frontmost
+        // is skipped by source app.
+        let pb = FakePasteboard()
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        frontmostBundleID: { "com.apple.Passwords" })
+        var captured: [Capture] = []
+        monitor.onCapture = { c, _ in captured.append(c) }
+
+        pb.write("hunter2")  // plain text, no concealed marker (Apple's behavior)
+        monitor.poll()
+
+        XCTAssertEqual(captured, [], "copies from the macOS Passwords app must be skipped")
+    }
+
+    func testCapturesCopyFromOrdinaryApp() throws {
+        let pb = FakePasteboard()
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        frontmostBundleID: { "com.apple.TextEdit" })
+        var captured: [Capture] = []
+        monitor.onCapture = { c, _ in captured.append(c) }
+
+        pb.write("just text")
+        monitor.poll()
+
+        XCTAssertEqual(captured, [.text("just text")])
+    }
+
     func testConcealedImageIsAlsoSkipped() throws {
         // The security filter applies to every kind, not just text.
         let pb = FakePasteboard()

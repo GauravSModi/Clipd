@@ -60,13 +60,30 @@ public final class PasteboardMonitor {
         "org.nspasteboard.TransientType",
     ]
 
+    /// Bundle ids of apps whose copies we skip by SOURCE, because they don't tag
+    /// the pasteboard. Apple's Passwords app copies a password as plain text with
+    /// no ConcealedType marker, so the type filter can't catch it; skipping by the
+    /// frontmost app at copy time is a best-effort fallback (it has a small timing
+    /// race and only covers the apps listed here — it is not security).
+    private static let excludedSourceApps: Set<String> = [
+        "com.apple.Passwords",        // macOS 15+ Passwords app
+        "com.apple.keychainaccess",   // Keychain Access
+    ]
+
+    /// Bundle id of the app that was frontmost when a copy happened, used for the
+    /// source-app skip above. Injected so it's testable; the app passes an
+    /// NSWorkspace-backed closure, the pure layer defaults to nil (no skip).
+    private let frontmostBundleID: () -> String?
+
     /// Called with (capture, epoch-ms timestamp) for each new, non-excluded copy.
     public var onCapture: ((Capture, Int64) -> Void)?
 
     public init(pasteboard: PasteboardReading,
-                now: @escaping () -> Int64 = clipdNowMs) {
+                now: @escaping () -> Int64 = clipdNowMs,
+                frontmostBundleID: @escaping () -> String? = { nil }) {
         self.pasteboard = pasteboard
         self.now = now
+        self.frontmostBundleID = frontmostBundleID
         // Seed from the current counter so whatever already sits on the pasteboard
         // at launch isn't re-ingested; only copies made afterward are captured.
         self.lastChangeCount = pasteboard.changeCount
@@ -87,6 +104,12 @@ public final class PasteboardMonitor {
         lastChangeCount = current
 
         guard !pasteboard.types.contains(where: Self.excludedTypes.contains) else { return false }
+
+        // Fallback for apps that don't tag concealed copies (notably Apple's
+        // Passwords app, which copies a bare plain-text string): skip by source.
+        if let bundleID = frontmostBundleID(), Self.excludedSourceApps.contains(bundleID) {
+            return false
+        }
 
         if let path = pasteboard.fileURLPath(), !path.isEmpty {
             emit(.file(path: path))

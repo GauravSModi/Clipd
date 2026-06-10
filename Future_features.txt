@@ -1,0 +1,128 @@
+# Future_features.txt
+# Living list. Not a plan. Not prioritized. Each line is a starting point;
+# anything cross-layer or that touches core invariants still needs a real
+# brainstorm + approved plan per CLAUDE.md.
+
+## Bugs / sharp edges noticed while running the app
+
+- Clicking an image row doesn't paste; pressing Enter does. (Likely the row's
+  tap gesture fires before / instead of the row activation that drives paste-
+  back. Image rows have the thumbnail leading view as an extra hit target —
+  worth checking SearchView.row + onTapGesture wiring.)
+
+## Settings UI
+
+- max_entries (currently 10,000, hardcoded in AppDelegate)
+- max_bytes total budget (currently 256 MB, hardcoded)
+- max_blob_bytes per-image cap (currently 50 MB, hardcoded)
+- compact threshold bytes (currently 4 MB)
+- poll interval (currently 0.5s)
+- toggle: paste-back default on Enter (paste vs copy)
+- the hotkey itself (KeyboardShortcuts library already supports rebinding —
+  just needs a Settings surface)
+- Note: PRD originally listed "Settings UI beyond the essentials" as a
+  non-goal — promoting any of these would need a PRD amendment.
+
+## Currently planned (next batch, being implemented now)
+
+- Pinned/favorites + delete an entry + clear history. PIN/UNPIN/TOMBSTONE/CLEAR
+  record types are already RESERVED in log.cpp; the next agent is wiring them.
+
+## PRD Future Work items (in the spec, deferred there)
+
+- Indexed search at scale: trie / n-gram index to take search sublinear,
+  with a synthetic 1M-entry benchmark showing the naive scan degrading and
+  the index holding up. Today's linear scan is imperceptible to ~50k entries.
+- Encryption-at-rest. The text log AND now the image blob store are
+  plaintext on disk. Concealed/transient skip is the floor, not security.
+  Real fix would touch every persistence path (Log.append/compact,
+  BlobStore.put/get) plus a key story (FileVault assist? user passphrase?
+  Keychain?).
+- FuzzyMatcher scoring floor. Subsequence matching returns all in-order hits
+  with no score floor. Correct by design per the PRD — confirm before
+  touching.
+- Concurrent compaction. Move compaction off the serial queue onto a
+  background thread, introducing a reader-writer lock. Only worth doing if
+  data size grows enough that serial-queue compaction causes perceptible
+  stalls.
+- Technical blog post about the storage engine (atomic rename / CRC32 /
+  v1 record format / blob store / migration). Linked from the README.
+
+## UX polish
+
+- Undo for delete in the search panel (a one-shot toast / ⌘Z within the
+  panel). Especially useful if per-row delete stays instant.
+- Quick-look preview for images (spacebar on a row, like Finder).
+- Drag-and-drop an entry out of the panel into another app.
+- "Reveal in Finder" for file entries (right-click or a per-row action).
+- Right-click context menu on a row — delete, pin, copy id, reveal in
+  Finder (for files), open with… (for files).
+- Multi-select + paste several entries in sequence.
+- "Paste as plain text" option (strip formatting).
+- Result count / live total in the panel footer.
+- Sort options beyond pinned-first → score: recency-only, kind filter.
+- Quick-filter syntax in the query: `kind:image`, `pinned:true`,
+  `since:1h` (would build on the pin/kind machinery feature 2 lands).
+- Configurable thumbnail size; thumbnail cache eviction policy (currently
+  unbounded for the session — fine for thousands of entries, less fine if
+  you pin hundreds of large images).
+
+## New capture modes
+
+- Format-preserving rich text. Capture both `.string` and `.rtf` /
+  `.html` representations so paste-back can choose. Today we capture text
+  only as `.string`, losing formatting. The store could carry a separate
+  formatted-payload kind, or extend TEXT with optional rich representations.
+- Image OCR for searchable image text (Vision framework). Big feature; the
+  blob is already there to index.
+- Snippets — named pinned entries (build on pinned identity). e.g. pin an
+  entry and give it the alias "signature".
+- Templated paste (substitute variables on paste — today's date, clipboard
+  previous, etc.).
+
+## Storage / scale / observability
+
+- A bounded, disk-backed thumbnail cache (today's is in-memory unbounded
+  per session in SearchModel).
+- Background pasteboard polling backoff — drop the rate when the app is
+  hidden or the system is on battery.
+- max_pinned_bytes cap so pinning can't blow past the total byte budget
+  unbounded (the agent flagged this honestly in the feature-2 plan).
+- "Storage health" CLI command: orphan blob count, blob bytes on disk vs
+  store_bytes, count of TEXT/IMAGE/FILE in the live set, count of records
+  in the log.
+
+## Distribution / packaging
+
+- Codesign + notarize + DMG for distribution.
+- Hardened runtime + app sandbox where compatible (the Accessibility
+  permission for paste-back complicates sandboxing).
+- Auto-update (Sparkle, or a simple manifest poll).
+- Homebrew cask.
+
+## Capture-priority refinements (decisions deliberately left)
+
+- Capture priority is text → image → file. A Finder file copy that also
+  carries a string would currently store as text — a known caveat in the
+  README. If a real app surfaces this, consider preferring file-url over
+  text when file-url is present (preserves the file-vs-text user intent),
+  while keeping text-over-image (the documented "rich text with inline
+  image → text" rule).
+- Per-image cap (50 MB) silently skips oversize images today. Consider a
+  visible notification ("image not stored: 73 MB exceeds 50 MB cap") so
+  the skip isn't a surprise.
+
+## Internationalization / matching
+
+- Accent-insensitive matching, CJK, emoji handling. ASCII-only matching is
+  a documented v1 limitation in CLAUDE.md.
+
+## Cross-device (PRD non-goal today, but worth noting)
+
+- iCloud sync was explicitly a PRD non-goal (kills the local-first story).
+  If that ever changes: would need end-to-end encryption (clients hold
+  keys, iCloud carries opaque blobs), conflict resolution for
+  pin/delete/clear across devices, and a per-device polling story.
+- Local export / import as a fallback — a one-shot JSON dump that another
+  install can read. Less ambitious than sync, gives portability without
+  the cross-device complexity.

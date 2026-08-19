@@ -73,6 +73,30 @@ hotkey works and survives a restart, Reset to Default restores ⌘⇧V, the stat
 menu's shortcut hint follows the new binding, and the login-item toggle agrees
 across both surfaces.
 
+**Stage 2 (capture gates) is shipped**, shell-only: a new pure `CapturePolicy`
+value in ClipdKit (pause flag + per-kind allow flags) plus `clipdSelectCapture`,
+the pure decision function `PasteboardMonitor.poll()` now calls instead of its old
+inline priority chain. The pause gate sits *after* `lastChangeCount` advances, so a
+copy made while paused is dropped for good, never replayed on resume. A
+disallowed kind **skips the copy entirely** — no fall-through to the next
+representation (unchecking "files" means a Finder ⌘C records nothing, not its
+filename). `PasteboardMonitor` reads the policy through an injected
+`() -> CapturePolicy` provider, re-evaluated every poll, so a settings change
+takes effect without rebuilding the monitor. Pause is persisted in `ClipdSettings`
+(`captureIsPaused` + `capturesText`/`capturesImages`/`capturesFiles`) — it
+survives a restart on purpose, since it has a Settings checkbox and is a setting.
+Surfaced from both a "Pause Capture" status-menu item (checkmark) and a new
+**Capture** tab in Settings; both read/write the same `ClipdSettings` property, so
+they can't disagree. The status-item icon swaps `doc.on.clipboard` → `pause.circle`
+(shown at `.large` symbol scale — the default `.small` menu-bar scale reads
+noticeably smaller than the doc icon) while paused; there is no slashed-clipboard
+SF Symbol. **Watch:** `@Published`'s projected publisher fires from `willSet`, so a
+Combine sink that discards its emitted value and re-reads the `ClipdSettings`
+property can observe the pre-change value on the very next run-loop turn (this bit
+the first cut of the icon swap — fixed by consuming the sink's own parameter).
+Run-the-app verified: pause/resume from the status menu, images/files toggles in
+Settings, and the icon/menu-checkmark agreement (after the fix above) all work.
+
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,
 **flag the conflict** — don't silently follow either one.

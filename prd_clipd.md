@@ -255,6 +255,13 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > Combine change signal), a tabbed Settings window hosted in an `NSWindow`, a
 > "Settings…" status-menu item, and the hotkey wired through as the pilot
 > setting. No C++ core, C API, header, or log change.
+>
+> **Stage 2 (capture gates, 2026-08-18)** is shell-only: pause/resume capture and
+> per-kind capture filters (text/image/file), both a gate `PasteboardMonitor`
+> consults via a pure `CapturePolicy` value. Pause is persisted and exposed from
+> both the status menu and a new Capture tab in Settings. A disallowed kind skips
+> the copy entirely rather than falling through to the next representation. No
+> C++ core, C API, header, or log change.
 
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).

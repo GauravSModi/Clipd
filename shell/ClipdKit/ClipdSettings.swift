@@ -42,6 +42,10 @@ public final class ClipdSettings: ObservableObject {
         // re-show the first-run prompts on every upgraded install.
         static let didPromptLaunchAtLogin = "didPromptLaunchAtLogin"
         static let didRequestAccessibility = "didRequestAccessibility"
+        static let captureIsPaused = "clipd.captureIsPaused"
+        static let capturesText = "clipd.capturesText"
+        static let capturesImages = "clipd.capturesImages"
+        static let capturesFiles = "clipd.capturesFiles"
     }
 
     private let defaults: UserDefaults
@@ -82,6 +86,26 @@ public final class ClipdSettings: ObservableObject {
         didSet { defaults.set(didRequestAccessibility, forKey: Key.didRequestAccessibility) }
     }
 
+    /// Whether clipboard capture is paused. Persisted (not session-only): it has a
+    /// Settings checkbox, so it IS a setting, and silently resuming capture on the
+    /// next launch would be a bad surprise for a privacy-framed app.
+    @Published public var captureIsPaused: Bool {
+        didSet { defaults.set(captureIsPaused, forKey: Key.captureIsPaused) }
+    }
+
+    /// Per-kind capture filters. A capture filter is a CAPTURE control, not a
+    /// privacy guarantee — it stops new copies being recorded; it does not remove
+    /// anything already stored, and the store is still local plaintext.
+    @Published public var capturesText: Bool {
+        didSet { defaults.set(capturesText, forKey: Key.capturesText) }
+    }
+    @Published public var capturesImages: Bool {
+        didSet { defaults.set(capturesImages, forKey: Key.capturesImages) }
+    }
+    @Published public var capturesFiles: Bool {
+        didSet { defaults.set(capturesFiles, forKey: Key.capturesFiles) }
+    }
+
     /// `defaults` is injectable so tests run against a throwaway suite instead of
     /// the user's real preferences.
     public init(defaults: UserDefaults = .standard) {
@@ -96,6 +120,17 @@ public final class ClipdSettings: ObservableObject {
                                                default: Self.defaultCompactThresholdBytes)
         didPromptLaunchAtLogin = defaults.object(forKey: Key.didPromptLaunchAtLogin) as? Bool ?? false
         didRequestAccessibility = defaults.object(forKey: Key.didRequestAccessibility) as? Bool ?? false
+        captureIsPaused = defaults.object(forKey: Key.captureIsPaused) as? Bool ?? false
+        capturesText = defaults.object(forKey: Key.capturesText) as? Bool ?? true
+        capturesImages = defaults.object(forKey: Key.capturesImages) as? Bool ?? true
+        capturesFiles = defaults.object(forKey: Key.capturesFiles) as? Bool ?? true
+    }
+
+    /// The CapturePolicy PasteboardMonitor should apply right now, assembled from
+    /// the four properties above — the one thing the app hands to the monitor.
+    public var capturePolicy: CapturePolicy {
+        CapturePolicy(isPaused: captureIsPaused, allowsText: capturesText,
+                     allowsImage: capturesImages, allowsFile: capturesFiles)
     }
 
     // MARK: - Reads

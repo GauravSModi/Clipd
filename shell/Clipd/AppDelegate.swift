@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import ApplicationServices
 import ServiceManagement
@@ -12,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var statusItem: NSStatusItem!
     private var statusMenu: NSMenu!
     private var launchAtLoginItem: NSMenuItem!
+    private var pauseCaptureItem: NSMenuItem!
     /// Held so menuNeedsUpdate can restate the current hotkey in its title.
     private var searchItem: NSMenuItem!
     private var panel: NSPanel!
@@ -33,10 +35,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var controller: HistoryController!
     private var model: SearchModel!
 
-    /// Persisted settings (caps, first-run flags). ClipdSettings owns the default
-    /// table these used to be hardcoded from; they are read once here at launch —
-    /// changing a cap live is a later stage's job.
+    /// Persisted settings (caps, first-run flags, capture policy). ClipdSettings
+    /// owns the default table the caps used to be hardcoded from; caps are read
+    /// once here at launch (changing a cap live is a later stage's job), but the
+    /// capture policy is read fresh on every poll via a provider closure.
     private let settings = ClipdSettings.shared
+    /// Keeps the status-item icon in sync with pause state changed from the
+    /// Settings window, not just from the status menu. Held for the process
+    /// lifetime.
+    private var settingsSubscriptions: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let clipboard = makeClipboard() else {
@@ -46,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         self.clipboard = clipboard
         monitor = PasteboardMonitor(
             pasteboard: SystemPasteboard(),
+            policy: { [settings] in settings.capturePolicy },
             frontmostBundleID: { NSWorkspace.shared.frontmostApplication?.bundleIdentifier })
         controller = HistoryController(clipboard: clipboard,
                                        monitor: monitor,
@@ -100,20 +108,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateStatusIcon()
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "doc.on.clipboard",
-                                   accessibilityDescription: "Clipd")
             button.action = #selector(statusItemClicked)
             button.target = self
             // Need right-clicks too, so we can show the menu instead of the panel.
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        // Keep the icon in sync with a pause toggle made in the Settings window,
+        // not just the status menu — both surfaces must agree. Use the value the
+        // sink hands us, not a re-read of settings.captureIsPaused: @Published
+        // publishes from willSet, so re-reading the property from inside the sink
+        // can still observe the PRE-toggle value on the very next run-loop turn —
+        // that was the "icon doesn't flip until the second toggle" bug.
+        settings.$captureIsPaused
+            .sink { [weak self] isPaused in self?.updateStatusIcon(paused: isPaused) }
+            .store(in: &settingsSubscriptions)
 
         statusMenu = NSMenu()
         statusMenu.delegate = self
         searchItem = statusMenu.addItem(withTitle: Self.searchItemTitle,
                                         action: #selector(togglePanel), keyEquivalent: "")
         statusMenu.addItem(.separator())
+        pauseCaptureItem = statusMenu.addItem(withTitle: "Pause Capture",
+                                              action: #selector(togglePauseCapture),
+                                              keyEquivalent: "")
         launchAtLoginItem = statusMenu.addItem(withTitle: "Launch at Login",
                                                action: #selector(toggleLaunchAtLogin),
                                                keyEquivalent: "")
@@ -128,6 +147,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         statusMenu.items.forEach { $0.target = self }
     }
 
+    /// `doc.on.clipboard` (the normal icon) while capturing, `pause.circle` while
+    /// paused. There is no slashed-clipboard SF Symbol, so a distinct pause glyph
+    /// reads more clearly as "paused" than the plain `clipboard` symbol did; the
+    /// status MENU item's checkmark remains the unambiguous indicator either way.
+    private func updateStatusIcon(paused: Bool = ClipdSettings.shared.captureIsPaused) {
+        let symbolName = paused ? "pause.circle" : "doc.on.clipboard"
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Clipd")
+        // pause.circle reads as smaller than doc.on.clipboard at the default menu-
+        // bar (.small) scale — bump it to .large so the paused state is easy to
+        // spot at a glance, matching the doc.on.clipboard glyph's visual weight.
+        statusItem.button?.image = paused
+            ? image?.withSymbolConfiguration(.init(scale: .large))
+            : image
+    }
+
     // MARK: - Launch at login
 
     /// Refresh from the real state each time the menu opens: the checkbox from the
@@ -140,6 +174,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         ClipdLoginItem.shared.refresh()
         launchAtLoginItem.state = ClipdLoginItem.shared.isEnabled ? .on : .off
         searchItem.title = Self.searchItemTitle
+        pauseCaptureItem.state = settings.captureIsPaused ? .on : .off
+    }
+
+    /// A frequent, transient action, so it lives in the status menu (in addition
+    /// to the Settings checkbox — both read/write the same ClipdSettings property).
+    @objc private func togglePauseCapture() {
+        settings.captureIsPaused.toggle()
     }
 
     /// "Search Clipd  (⌘⇧V)", or just "Search Clipd" when no shortcut is bound.
@@ -205,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// search panel's auto-dismiss hook and must stay panel-only.
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 220),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 280),
                                   styleMask: [.titled, .closable],
                                   backing: .buffered,
                                   defer: false)

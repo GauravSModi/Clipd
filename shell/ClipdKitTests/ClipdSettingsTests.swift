@@ -158,4 +158,52 @@ final class ClipdSettingsTests: XCTestCase {
         XCTAssertEqual(settings.compactThresholdBytes,
                        ClipdSettings.defaultCompactThresholdBytes)
     }
+
+    // MARK: - Capture policy (pause + per-kind filters)
+
+    func testEmptyStoreCapturesEverythingAndIsNotPaused() {
+        let settings = ClipdSettings(defaults: defaults)
+
+        XCTAssertFalse(settings.captureIsPaused)
+        XCTAssertTrue(settings.capturesText)
+        XCTAssertTrue(settings.capturesImages)
+        XCTAssertTrue(settings.capturesFiles)
+    }
+
+    func testCaptureSettingsWriteThroughToRawKeys() {
+        let settings = ClipdSettings(defaults: defaults)
+
+        settings.captureIsPaused = true
+        settings.capturesImages = false
+
+        XCTAssertEqual(defaults.object(forKey: "clipd.captureIsPaused") as? Bool, true)
+        XCTAssertEqual(defaults.object(forKey: "clipd.capturesImages") as? Bool, false)
+    }
+
+    func testCaptureSettingsSurviveANewInstanceOverTheSameStore() {
+        // Decision 1: pause is a persisted setting, not session-only state.
+        let first = ClipdSettings(defaults: defaults)
+        first.captureIsPaused = true
+        first.capturesFiles = false
+
+        let second = ClipdSettings(defaults: defaults)
+
+        XCTAssertTrue(second.captureIsPaused)
+        XCTAssertFalse(second.capturesFiles)
+    }
+
+    func testCapturePolicyMirrorsTheFourProperties() {
+        let settings = ClipdSettings(defaults: defaults)
+        settings.captureIsPaused = false
+        settings.capturesText = true
+        settings.capturesImages = false
+        settings.capturesFiles = true
+
+        let policy = settings.capturePolicy
+
+        XCTAssertFalse(policy.isPaused)
+        XCTAssertTrue(policy.allows(.text))
+        XCTAssertFalse(policy.allows(.image))
+        XCTAssertTrue(policy.allows(.file))
+    }
 }

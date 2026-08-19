@@ -14,8 +14,10 @@ struct SettingsView: View {
         TabView {
             GeneralSettingsView()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            CaptureSettingsView()
+                .tabItem { Label("Capture", systemImage: "clipboard") }
         }
-        .frame(width: 460, height: 200)
+        .frame(width: 460, height: 260)
         .padding(.top, 8)
     }
 }
@@ -48,6 +50,41 @@ struct GeneralSettingsView: View {
         .onAppear { loginItem.refresh() }
         .onReceive(NotificationCenter.default.publisher(
             for: NSWindow.didBecomeKeyNotification)) { _ in loginItem.refresh() }
+    }
+}
+
+/// Capture: pause/resume, and per-kind capture filters (text/image/file). Both are
+/// the same shape — a gate PasteboardMonitor consults on every poll — so they share
+/// one tab. ClipdSettings is the single store; toggling here and toggling "Pause
+/// Capture" in the status menu read/write the same properties, so the two surfaces
+/// can't disagree.
+struct CaptureSettingsView: View {
+    @ObservedObject private var settings = ClipdSettings.shared
+
+    var body: some View {
+        Form {
+            Toggle("Pause clipboard capture", isOn: $settings.captureIsPaused)
+                .toggleStyle(.checkbox)
+
+            Divider().padding(.vertical, 4)
+
+            Text("Capture these types:")
+            Toggle("Text", isOn: $settings.capturesText)
+                .toggleStyle(.checkbox)
+            Toggle("Images", isOn: $settings.capturesImages)
+                .toggleStyle(.checkbox)
+            Toggle("Files", isOn: $settings.capturesFiles)
+                .toggleStyle(.checkbox)
+
+            Divider().padding(.vertical, 4)
+
+            Text("These filters affect new copies only — nothing already saved is "
+                + "removed, and this is not encryption. Clipd's history is still "
+                + "stored as local plaintext.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
     }
 }
 

@@ -226,4 +226,75 @@ final class PasteboardMonitorTests: XCTestCase {
         monitor.poll()
         XCTAssertEqual(captured, [.text("new copy")])
     }
+
+    // MARK: - Capture policy (pause + per-kind filters)
+
+    func testPausedCopyIsSkippedNotDeferredToResume() throws {
+        // Required regression: a copy made while paused must be dropped for good,
+        // not replayed the moment capture resumes.
+        let pb = FakePasteboard()
+        var paused = true
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        policy: { CapturePolicy(isPaused: paused,
+                                                                allowsText: true,
+                                                                allowsImage: true,
+                                                                allowsFile: true) })
+        var captured: [Capture] = []
+        monitor.onCapture = { c, _ in captured.append(c) }
+
+        pb.write("made while paused")
+        monitor.poll()
+        XCTAssertEqual(captured, [], "a copy made while paused must not be captured")
+
+        paused = false
+        monitor.poll()                   // no NEW pasteboard change since the last poll
+        XCTAssertEqual(captured, [],
+                       "resuming must not resurrect the copy made while paused")
+
+        pb.write("made after resuming")
+        monitor.poll()
+        XCTAssertEqual(captured, [.text("made after resuming")])
+    }
+
+    func testDisallowedKindIsSkippedWhileOtherKindsStillCapture() throws {
+        let pb = FakePasteboard()
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        policy: { CapturePolicy(isPaused: false,
+                                                                allowsText: true,
+                                                                allowsImage: false,
+                                                                allowsFile: true) })
+        var captured: [Capture] = []
+        monitor.onCapture = { c, _ in captured.append(c) }
+
+        pb.writeImage(ImageCapture(data: Data([1]), width: 1, height: 1, format: .png))
+        monitor.poll()
+        XCTAssertEqual(captured, [], "images are disallowed by policy")
+
+        pb.write("still captured")
+        monitor.poll()
+        XCTAssertEqual(captured, [.text("still captured")])
+    }
+
+    func testPolicyIsReReadOnEveryPollWithoutRebuildingTheMonitor() throws {
+        let pb = FakePasteboard()
+        var allowsImage = false
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        policy: { CapturePolicy(isPaused: false,
+                                                                allowsText: true,
+                                                                allowsImage: allowsImage,
+                                                                allowsFile: true) })
+        var captured: [Capture] = []
+        monitor.onCapture = { c, _ in captured.append(c) }
+
+        let img = ImageCapture(data: Data([1]), width: 1, height: 1, format: .png)
+        pb.writeImage(img)
+        monitor.poll()
+        XCTAssertEqual(captured, [], "images start disallowed")
+
+        allowsImage = true
+        pb.writeImage(img)
+        monitor.poll()
+        XCTAssertEqual(captured, [.image(img)],
+                       "the same monitor instance must pick up the policy change")
+    }
 }

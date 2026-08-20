@@ -49,6 +49,20 @@ public final class HistoryController {
         try clipboard.clear()
     }
 
+    /// Retune the live caps. A pure passthrough: eviction (and the pinned
+    /// exemption) is the C++ store's job, and the call is already serialized on
+    /// Clipboard's queue.
+    public func setLimits(maxEntries: Int, maxBytes: UInt64) throws {
+        try clipboard.setLimits(maxEntries: maxEntries, maxBytes: maxBytes)
+    }
+
+    /// Live entry count, log size, and live byte usage. Public so a settings
+    /// surface can tell whether a proposed cap would evict anything before it
+    /// applies one; compactIfNeeded below uses the same call.
+    public func stats() throws -> Stats {
+        try clipboard.stats()
+    }
+
     private func ingest(_ capture: Capture, at timestamp: Int64) {
         // A failed write leaves the store unchanged (the core makes each add
         // atomic); we don't crash the app over one dropped copy.
@@ -74,7 +88,7 @@ public final class HistoryController {
     /// the session adds records (the policy lives in the core — we only decide
     /// *when* to ask).
     private func compactIfNeeded() throws {
-        if try clipboard.stats().logBytes > compactThresholdBytes {
+        if try stats().logBytes > compactThresholdBytes {
             try clipboard.compact()
         }
     }

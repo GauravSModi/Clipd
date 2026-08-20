@@ -86,3 +86,25 @@ final class HistoryControllerTests: XCTestCase {
         XCTAssertEqual(try controller.search("").count, 0)
     }
 }
+
+// MARK: - Live limits passthrough
+
+extension HistoryControllerTests {
+    /// The controller is a passthrough: eviction policy lives in the C++ store,
+    /// and stats has to be reachable so the shell can decide whether a proposed
+    /// cap would evict before it asks the user.
+    func testSetLimitsAndStatsPassThroughToTheCore() throws {
+        let clip = try makeClipboard()
+        let monitor = PasteboardMonitor(pasteboard: FakePasteboard(), now: { 1 })
+        let controller = HistoryController(clipboard: clip,
+                                           monitor: monitor,
+                                           compactThresholdBytes: 1 << 30,
+                                           now: { 2 })
+        for i in 0..<12 { try clip.add("entry \(i)", at: Int64(i + 1)) }
+        XCTAssertEqual(try controller.stats().entryCount, 12)
+
+        try controller.setLimits(maxEntries: 4, maxBytes: 0)
+
+        XCTAssertEqual(try controller.stats().entryCount, 4)
+    }
+}

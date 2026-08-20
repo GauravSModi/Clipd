@@ -124,6 +124,36 @@ restart, the list survives quit/relaunch, and both tabs lay out cleanly.
 off during testing reads later as "the app captures nothing" — check
 `defaults read com.clipd.Clipd` (`clipd.capturesText` etc.) before debugging capture.
 
+**Stage 4 (history caps) is shipped** — the first stage of the batch to open
+C++, so it crosses `src/` → `include/` → `shell/`. `ClipStore::set_limits` is a
+**second eviction trigger** (see the amended invariant below): it replaces both
+caps and evicts down immediately, because a cap the user just lowered that only
+takes effect on the next copy is a bug, not a policy. Eviction itself is not
+reimplemented anywhere — `set_limits` assigns the two members and calls the
+existing `evict()`, so the pinned exemption, the never-evict-the-most-recent
+guard, and the nothing-evictable termination case all come along unchanged (a
+cap can still be held **above** its limit by pins). New `clipd_set_limits`
+carries exactly the two caps `ClipStore` owns; `max_blob_bytes` deliberately
+stays a `clipd_create` parameter, since it is an **ingest-side** reject rule and
+lowering it could not retroactively remove a stored image. The setter does
+**not** rewrite the log: evicted records drop at the next compaction on the
+existing threshold, which keeps the documented "raising the cap can recover
+evicted entries from the log *only before* the next compaction" grace intact.
+Shell: a new **History** tab (caps are about how much is kept; Capture is about
+what gets recorded), with bounded controls only — 100–100,000 entries via
+field+stepper, a preset picker for the budget, and no "unlimited" option, so the
+UI can't produce a value `ClipdSettings.positiveInt` treats as corrupt (the
+0-means-unbounded C contract is unchanged for API callers). A reduction is
+confirmed **only when it would actually evict**; the count it names is an
+**upper bound** ("up to N"), because pinned entries are exempt and `ClipdStats`
+carries no pinned count, and a byte reduction names sizes rather than a count.
+The alert copy promises neither permanence nor recoverability — a
+`HistoryLimitsTests` case pins that wording. **Watch:** `AppDelegate`'s two
+`@Published` sinks each consume their **own** emitted value and read the *other*
+cap off `settings` (the willSet trap again), and both use `.dropFirst()` so
+launch doesn't re-apply the values `clipd_create` was just handed. Run-the-app
+verification of the History tab is still pending.
+
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,
 **flag the conflict** — don't silently follow either one.
@@ -179,8 +209,12 @@ xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
 - **ClipStore stays behind its narrow interface** and **pure in-memory** — the
   backing (list + id-keyed map) is swappable; evicting an image entry does NOT
   touch blobs (blob GC is Core's job at compaction). It is the sole authority on
-  pinned state and liveness (`set_pinned`/`remove`/`clear_unpinned`); only
-  `upsert` evicts (so replay reproduces eviction exactly).
+  pinned state and liveness (`set_pinned`/`remove`/`clear_unpinned`). **Two
+  triggers evict, and only two**: `upsert`, and `set_limits` (which applies a
+  lowered cap at once rather than waiting for the next copy). Replay still
+  reproduces eviction exactly because replay never calls `set_limits` — recovery
+  constructs the store with the already-current caps and drives every record
+  through `upsert`.
 - **Identity is content-derived, single-sourced** — `id = sha256-hex(kind_byte ‖
   defining content)` via `src/identity.{hpp,cpp}`. Both ingest and replay go
   through that helper (and the image-label helper in `core.cpp`) so the scheme

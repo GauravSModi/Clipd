@@ -35,6 +35,12 @@ std::list<Entry>::iterator ClipStore::least_recent_evictable() {
   return entries_.end();
 }
 
+void ClipStore::set_limits(size_t max_entries, uint64_t max_bytes) {
+  max_entries_ = max_entries;
+  max_bytes_ = max_bytes;
+  evict();  // apply the new caps now, not on the next upsert
+}
+
 void ClipStore::evict() {
   // Evict least-recent unpinned entries while either cap is exceeded. Pinned
   // entries and the most-recent insert are exempt, so a budget can be held above

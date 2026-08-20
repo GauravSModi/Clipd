@@ -150,6 +150,27 @@ int clipd_delete(ClipdCore* core, const char* id);
 int clipd_clear(ClipdCore* core);
 
 /*
+ * Replace the live history caps. `max_entries` caps the live count (0 = no count
+ * cap); `max_bytes` caps the summed byte_size of the live set (0 = unbounded) —
+ * the same zero semantics clipd_create() uses. Entries beyond the new caps are
+ * evicted IMMEDIATELY, not on the next add.
+ *
+ * Pinned entries are exempt from BOTH caps, so a cap can be held above its limit
+ * (pinning many large images can keep usage above max_bytes). The most-recent
+ * entry is never evicted either. Raising a cap evicts nothing and brings nothing
+ * back: the live set is in memory.
+ *
+ * This does NOT rewrite the log — evicted records are dropped at the next
+ * compaction, not here. It also does not change `max_blob_bytes`: that is an
+ * ingest-side reject rule for a single image, so lowering it could not remove an
+ * image already stored; it stays a clipd_create() parameter.
+ *
+ * Returns 0 on success, nonzero on failure. A NULL handle is safe (no crash) and
+ * reports failure, like every other int-returning call here.
+ */
+int clipd_set_limits(ClipdCore* core, size_t max_entries, uint64_t max_bytes);
+
+/*
  * Fetch the bytes of the blob identified by `id` (an IMAGE match's `id`). On
  * success returns a freshly allocated buffer of *out_len bytes that the caller
  * MUST release with clipd_free_blob(); on failure (unknown id, malformed id, or

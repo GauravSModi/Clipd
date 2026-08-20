@@ -76,3 +76,85 @@ final class ClipboardTests: XCTestCase {
         XCTAssertEqual(try clip.stats().entryCount, adds)
     }
 }
+
+// MARK: - Live limits (clipd_set_limits)
+
+extension ClipboardTests {
+    private func makeLimitsClipboard(maxEntries: Int, maxBytes: UInt64 = 0) throws -> Clipboard {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clipd-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return try Clipboard(logPath: dir.appendingPathComponent("clipd.log").path,
+                             maxEntries: maxEntries,
+                             compactThresholdBytes: 1 << 30,  // never auto-compact here
+                             maxBytes: maxBytes)
+    }
+
+    /// The whole point of the setter: a lowered cap takes effect at once, with no
+    /// further add and no restart.
+    func testSetLimitsEvictsDownImmediately() throws {
+        let clip = try makeLimitsClipboard(maxEntries: 100)
+        for i in 0..<20 { try clip.add("entry \(i)", at: Int64(i + 1)) }
+        XCTAssertEqual(try clip.stats().entryCount, 20)
+
+        try clip.setLimits(maxEntries: 5, maxBytes: 0)
+
+        XCTAssertEqual(try clip.stats().entryCount, 5)
+        let results = try clip.search("", maxResults: 50, now: 100)
+        XCTAssertEqual(results.count, 5)
+        XCTAssertEqual(results.first?.text, "entry 19")  // least-recent evicted first
+    }
+
+    func testSetLimitsAppliesTheByteBudget() throws {
+        let clip = try makeLimitsClipboard(maxEntries: 0)
+        // Text entries: byte_size is the text length, so these are 10 bytes each.
+        for i in 0..<5 { try clip.add("abcdefgh\(i)x", at: Int64(i + 1)) }
+        XCTAssertEqual(try clip.stats().storeBytes, 50)
+
+        try clip.setLimits(maxEntries: 0, maxBytes: 25)
+
+        XCTAssertEqual(try clip.stats().entryCount, 2)
+        XCTAssertEqual(try clip.stats().storeBytes, 20)
+    }
+
+    /// Pinned entries are exempt from both caps — the cap is held above its limit
+    /// rather than a pin being dropped (documented, intentional).
+    func testSetLimitsSparesPinnedEntries() throws {
+        let clip = try makeLimitsClipboard(maxEntries: 100)
+        try clip.add("keep me", at: 1)
+        guard let pinned = try clip.search("keep", maxResults: 1, now: 10).first else {
+            return XCTFail("expected the entry we just added")
+        }
+        try clip.setPinned(pinned.id, true)
+        for i in 0..<10 { try clip.add("junk \(i)", at: Int64(i + 2)) }
+
+        try clip.setLimits(maxEntries: 2, maxBytes: 0)
+
+        let survivors = try clip.search("keep", maxResults: 10, now: 100)
+        XCTAssertEqual(survivors.count, 1)
+        XCTAssertTrue(survivors.first?.pinned ?? false)
+    }
+
+    /// Raising a cap evicts nothing — and brings nothing back. The live set is in
+    /// memory; a raised cap can only recover entries via a replay from the log,
+    /// and only before the next compaction.
+    func testRaisingTheCapEvictsNothingAndRestoresNothing() throws {
+        let clip = try makeLimitsClipboard(maxEntries: 3)
+        for i in 0..<10 { try clip.add("entry \(i)", at: Int64(i + 1)) }
+        XCTAssertEqual(try clip.stats().entryCount, 3)
+
+        try clip.setLimits(maxEntries: 100, maxBytes: 0)
+
+        XCTAssertEqual(try clip.stats().entryCount, 3)
+    }
+
+    /// The new caps must govern later adds too, not just the one-shot eviction.
+    func testSetLimitsGovernsSubsequentAdds() throws {
+        let clip = try makeLimitsClipboard(maxEntries: 100)
+        try clip.add("first", at: 1)
+        try clip.setLimits(maxEntries: 2, maxBytes: 0)
+        for i in 0..<10 { try clip.add("later \(i)", at: Int64(i + 2)) }
+
+        XCTAssertEqual(try clip.stats().entryCount, 2)
+    }
+}

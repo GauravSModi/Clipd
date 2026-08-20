@@ -10,15 +10,144 @@ import ClipdKit
 /// there is no SwiftUI `Settings` scene — AppDelegate hosts this in an NSWindow via
 /// NSHostingView, the same way setupPanel() hosts SearchView.
 struct SettingsView: View {
+    /// Applies a proposed pair of history caps, confirming first if the change
+    /// would evict. Returns false when the user cancels, so the History tab can
+    /// snap its controls back. Owned by AppDelegate: the alert is AppKit, and the
+    /// live-set stats it needs come from the controller.
+    let onCommitHistoryLimits: (Int, UInt64) -> Bool
+
     var body: some View {
         TabView {
             GeneralSettingsView()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            HistorySettingsView(onCommit: onCommitHistoryLimits)
+                .tabItem { Label("History", systemImage: "clock") }
             CaptureSettingsView()
                 .tabItem { Label("Capture", systemImage: "clipboard") }
         }
         .frame(width: 460, height: 440)
         .padding(.top, 8)
+    }
+}
+
+/// History: how much is kept. Separate from Capture on purpose — Capture decides
+/// what gets recorded, History decides how much of it survives.
+///
+/// Both controls are bounded and offer no "unlimited" option (see
+/// ClipdHistoryLimits), and both commit on a real gesture — Enter, focus loss, a
+/// stepper click, a picker selection. There is no Apply button and no debounce
+/// timer: a change applies live, after a confirmation if it would evict.
+///
+/// The two values live in local state rather than binding straight to
+/// ClipdSettings, because a cancelled confirmation has to revert without ever
+/// having persisted. `settings` is the source of truth after every attempt, so
+/// both commit paths re-seed from it whether the user accepted or cancelled.
+struct HistorySettingsView: View {
+    @ObservedObject private var settings = ClipdSettings.shared
+    let onCommit: (Int, UInt64) -> Bool
+
+    @State private var entriesText = ""
+    @State private var byteBudget: UInt64 = ClipdSettings.defaultMaxBytes
+    @FocusState private var entriesFocused: Bool
+
+    init(onCommit: @escaping (Int, UInt64) -> Bool) {
+        self.onCommit = onCommit
+    }
+
+    var body: some View {
+        Form {
+            HStack(spacing: 6) {
+                Text("Keep at most")
+                TextField("", text: $entriesText)
+                    .frame(width: 72)
+                    .multilineTextAlignment(.trailing)
+                    .focused($entriesFocused)
+                    .onSubmit { commitEntries() }
+                Stepper("", value: entriesStepper,
+                        in: ClipdHistoryLimits.minEntries...ClipdHistoryLimits.maxEntries,
+                        step: 100)
+                    .labelsHidden()
+                Text("entries")
+            }
+            Text("\(ClipdHistoryLimits.minEntries.formatted())–"
+                + "\(ClipdHistoryLimits.maxEntries.formatted()) entries.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            Picker("Storage budget:", selection: budgetSelection) {
+                ForEach(ClipdHistoryLimits.byteBudgetOptions, id: \.self) { option in
+                    Text(ClipdHistoryLimits.label(forBytes: option)).tag(option)
+                }
+            }
+            .frame(width: 240)
+
+            Text("Clipd evicts its least-recent entries once either limit is "
+                + "reached. Lowering a limit takes effect right away — Clipd asks "
+                + "first if entries would be removed.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("Pinned entries are never evicted, so pinning a lot of large "
+                + "images can keep Clipd above the storage budget.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .onAppear(perform: reseed)
+        // No publisher observation here on purpose: both commit paths reseed from
+        // `settings` afterwards, and this view is the only thing that changes
+        // these two values while the window is open. A `.onReceive` on a
+        // `dropFirst()` publisher would also be rebuilt on every body pass, which
+        // is exactly the kind of resubscribe that fires at the wrong moment and
+        // clobbers a half-typed field.
+        //
+        // Committing on focus loss is what makes "type a number and click away"
+        // behave the same as pressing Enter.
+        .onChange(of: entriesFocused) { isFocused in
+            if !isFocused { commitEntries() }
+        }
+    }
+
+    private func reseed() {
+        entriesText = String(settings.maxEntries)
+        byteBudget = ClipdHistoryLimits.nearestByteBudget(to: settings.maxBytes)
+    }
+
+    /// The stepper drives the same text field the user can type into, and a click
+    /// is itself a commit gesture.
+    private var entriesStepper: Binding<Int> {
+        Binding(get: { parsedEntries },
+                set: { entriesText = String($0); commitEntries() })
+    }
+
+    private var budgetSelection: Binding<UInt64> {
+        Binding(get: { byteBudget }, set: { commitBudget($0) })
+    }
+
+    /// Digits only, then clamped — so a half-typed "1" can never reach the store
+    /// as a one-entry history, and a paste of junk falls back to what is in force.
+    private var parsedEntries: Int {
+        let digits = entriesText.filter(\.isWholeNumber)
+        return ClipdHistoryLimits.clampEntries(Int(digits) ?? settings.maxEntries)
+    }
+
+    private func commitEntries() {
+        let proposed = parsedEntries
+        // Pass the *committed* budget, not the local one, so each control commits
+        // only its own change and a confirmation names only what actually moved.
+        if proposed != settings.maxEntries {
+            _ = onCommit(proposed, settings.maxBytes)
+        }
+        reseed()  // settings is the truth, whether the change applied or was cancelled
+    }
+
+    private func commitBudget(_ proposed: UInt64) {
+        guard proposed != settings.maxBytes else { return }
+        byteBudget = proposed  // show the click immediately; reseed corrects a cancel
+        _ = onCommit(settings.maxEntries, proposed)
+        reseed()
     }
 }
 

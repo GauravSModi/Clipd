@@ -192,6 +192,104 @@ final class ClipdSettingsTests: XCTestCase {
         XCTAssertFalse(second.capturesFiles)
     }
 
+    // MARK: - Excluded source apps
+
+    func testEmptyStoreSeedsTheDocumentedExcludedApps() {
+        // An install that predates the editable list must keep behaving the same:
+        // an absent key reads back as the two ids that used to be compiled into
+        // PasteboardMonitor.
+        let settings = ClipdSettings(defaults: defaults)
+
+        XCTAssertEqual(settings.excludedSourceApps,
+                       ClipdSettings.defaultExcludedSourceApps)
+    }
+
+    func testSeededExcludedAppsAreTheTwoAppleIDs() {
+        // PasteboardMonitor's injected default is permissive (no exclusions), so
+        // this table is the ONLY thing keeping the Passwords/Keychain fallback
+        // alive. A drift here silently drops it.
+        XCTAssertEqual(ClipdSettings.defaultExcludedSourceApps,
+                       ["com.apple.Passwords", "com.apple.keychainaccess"])
+    }
+
+    func testExcludedAppsWriteThroughToTheRawKey() {
+        let settings = ClipdSettings(defaults: defaults)
+
+        settings.excludedSourceApps = ["com.example.vault"]
+
+        XCTAssertEqual(defaults.object(forKey: "clipd.excludedSourceApps") as? [String],
+                       ["com.example.vault"])
+    }
+
+    func testExcludedAppsSurviveANewInstanceOverTheSameStore() {
+        let first = ClipdSettings(defaults: defaults)
+        first.addExcludedApp("com.example.vault")
+
+        let second = ClipdSettings(defaults: defaults)
+
+        XCTAssertTrue(second.excludedSourceApps.contains("com.example.vault"))
+    }
+
+    func testEmptiedListStaysEmptyAndIsNotReSeeded() {
+        // Decision: removal is a real, persisted choice. A STORED empty array is
+        // honored; only a missing key falls back to the seed.
+        let first = ClipdSettings(defaults: defaults)
+        for id in first.excludedSourceApps { first.removeExcludedApp(id) }
+        XCTAssertEqual(first.excludedSourceApps, [])
+
+        let second = ClipdSettings(defaults: defaults)
+
+        XCTAssertEqual(second.excludedSourceApps, [],
+                       "an emptied list must not silently re-seed on next launch")
+    }
+
+    func testCorruptExcludedAppsValueFallsBackToTheSeed() {
+        defaults.set("not-an-array", forKey: "clipd.excludedSourceApps")
+
+        XCTAssertEqual(ClipdSettings(defaults: defaults).excludedSourceApps,
+                       ClipdSettings.defaultExcludedSourceApps)
+    }
+
+    func testAddingADuplicateIsANoOpAndKeepsOrder() {
+        let settings = ClipdSettings(defaults: defaults)
+        settings.excludedSourceApps = ["com.a", "com.b"]
+
+        settings.addExcludedApp("com.a")
+
+        XCTAssertEqual(settings.excludedSourceApps, ["com.a", "com.b"],
+                       "a duplicate must neither append nor reorder")
+    }
+
+    func testAddingTrimsWhitespaceAndIgnoresEmpty() {
+        let settings = ClipdSettings(defaults: defaults)
+        settings.excludedSourceApps = []
+
+        settings.addExcludedApp("  com.example.vault  ")
+        settings.addExcludedApp("   ")
+        settings.addExcludedApp("")
+
+        XCTAssertEqual(settings.excludedSourceApps, ["com.example.vault"])
+    }
+
+    func testRemovingAnAppDropsItFromTheList() {
+        let settings = ClipdSettings(defaults: defaults)
+        settings.excludedSourceApps = ["com.a", "com.b"]
+
+        settings.removeExcludedApp("com.a")
+        settings.removeExcludedApp("com.not-present")
+
+        XCTAssertEqual(settings.excludedSourceApps, ["com.b"])
+    }
+
+    func testExcludedSourceAppIDsMirrorsTheList() {
+        // The Set is what PasteboardMonitor's provider hands back; the Array is
+        // what the UI lists in a stable order.
+        let settings = ClipdSettings(defaults: defaults)
+        settings.excludedSourceApps = ["com.a", "com.b"]
+
+        XCTAssertEqual(settings.excludedSourceAppIDs, ["com.a", "com.b"])
+    }
+
     func testCapturePolicyMirrorsTheFourProperties() {
         let settings = ClipdSettings(defaults: defaults)
         settings.captureIsPaused = false

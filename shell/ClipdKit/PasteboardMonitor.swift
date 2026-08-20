@@ -65,10 +65,12 @@ public final class PasteboardMonitor {
     /// no ConcealedType marker, so the type filter can't catch it; skipping by the
     /// frontmost app at copy time is a best-effort fallback (it has a small timing
     /// race and only covers the apps listed here — it is not security).
-    private static let excludedSourceApps: Set<String> = [
-        "com.apple.Passwords",        // macOS 15+ Passwords app
-        "com.apple.keychainaccess",   // Keychain Access
-    ]
+    ///
+    /// User-editable, so it arrives as a provider closure read fresh on every poll
+    /// (like `policy` below): an edit in Settings takes effect on the next poll with
+    /// no app restart. The default is permissive — the app injects the real list
+    /// from ClipdSettings, whose default table seeds the two Apple ids.
+    private let excludedApps: () -> Set<String>
 
     /// Bundle id of the app that was frontmost when a copy happened, used for the
     /// source-app skip above. Injected so it's testable; the app passes an
@@ -87,10 +89,12 @@ public final class PasteboardMonitor {
     public init(pasteboard: PasteboardReading,
                 now: @escaping () -> Int64 = clipdNowMs,
                 policy: @escaping () -> CapturePolicy = { .capturingEverything },
+                excludedApps: @escaping () -> Set<String> = { [] },
                 frontmostBundleID: @escaping () -> String? = { nil }) {
         self.pasteboard = pasteboard
         self.now = now
         self.policy = policy
+        self.excludedApps = excludedApps
         self.frontmostBundleID = frontmostBundleID
         // Seed from the current counter so whatever already sits on the pasteboard
         // at launch isn't re-ingested; only copies made afterward are captured.
@@ -115,7 +119,7 @@ public final class PasteboardMonitor {
 
         // Fallback for apps that don't tag concealed copies (notably Apple's
         // Passwords app, which copies a bare plain-text string): skip by source.
-        if let bundleID = frontmostBundleID(), Self.excludedSourceApps.contains(bundleID) {
+        if let bundleID = frontmostBundleID(), excludedApps().contains(bundleID) {
             return false
         }
 

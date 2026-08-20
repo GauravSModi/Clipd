@@ -17,7 +17,7 @@ struct SettingsView: View {
             CaptureSettingsView()
                 .tabItem { Label("Capture", systemImage: "clipboard") }
         }
-        .frame(width: 460, height: 260)
+        .frame(width: 460, height: 440)
         .padding(.top, 8)
     }
 }
@@ -53,11 +53,11 @@ struct GeneralSettingsView: View {
     }
 }
 
-/// Capture: pause/resume, and per-kind capture filters (text/image/file). Both are
-/// the same shape — a gate PasteboardMonitor consults on every poll — so they share
-/// one tab. ClipdSettings is the single store; toggling here and toggling "Pause
-/// Capture" in the status menu read/write the same properties, so the two surfaces
-/// can't disagree.
+/// Capture: pause/resume, per-kind capture filters (text/image/file), and the apps
+/// to skip by source. All three are the same shape — a gate PasteboardMonitor
+/// consults on every poll — so they share one tab. ClipdSettings is the single
+/// store; toggling here and toggling "Pause Capture" in the status menu read/write
+/// the same properties, so the two surfaces can't disagree.
 struct CaptureSettingsView: View {
     @ObservedObject private var settings = ClipdSettings.shared
 
@@ -76,11 +76,27 @@ struct CaptureSettingsView: View {
             Toggle("Files", isOn: $settings.capturesFiles)
                 .toggleStyle(.checkbox)
 
-            Divider().padding(.vertical, 4)
-
             Text("These filters affect new copies only — nothing already saved is "
                 + "removed, and this is not encryption. Clipd's history is still "
                 + "stored as local plaintext.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            // The framing here has to stay honest: this is a frontmost-app check
+            // with a poll-interval race that only covers the listed apps. It is a
+            // best-effort heuristic, not security (see CLAUDE.md).
+            Text("Don’t capture from these apps:")
+            ExcludedAppsView(settings: settings)
+            Text("Clipd skips a copy while one of these apps is frontmost. It’s a "
+                + "best-effort check with a brief timing window — it can miss "
+                + "copies, and it is not a security guarantee.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Apple’s Passwords and Keychain Access don’t mark copies as "
+                + "secret, so removing them can leave passwords in Clipd’s "
+                + "plaintext history.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

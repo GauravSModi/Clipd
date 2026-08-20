@@ -162,6 +162,7 @@ final class PasteboardMonitorTests: XCTestCase {
         // is skipped by source app.
         let pb = FakePasteboard()
         let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        excludedApps: { ["com.apple.Passwords"] },
                                         frontmostBundleID: { "com.apple.Passwords" })
         var captured: [Capture] = []
         monitor.onCapture = { c, _ in captured.append(c) }
@@ -175,6 +176,7 @@ final class PasteboardMonitorTests: XCTestCase {
     func testCapturesCopyFromOrdinaryApp() throws {
         let pb = FakePasteboard()
         let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        excludedApps: { ["com.apple.Passwords"] },
                                         frontmostBundleID: { "com.apple.TextEdit" })
         var captured: [Capture] = []
         monitor.onCapture = { c, _ in captured.append(c) }
@@ -183,6 +185,55 @@ final class PasteboardMonitorTests: XCTestCase {
         monitor.poll()
 
         XCTAssertEqual(captured, [.text("just text")])
+    }
+
+    // MARK: - Excluded source apps (user-editable, injected)
+
+    func testConsultsTheInjectedExcludedSetNotACompiledInOne() throws {
+        // The list is a user-managed setting now: only what's injected is skipped.
+        // com.apple.Passwords is captured here precisely because the injected set
+        // doesn't contain it — proof no static set is still in play.
+        let pb = FakePasteboard()
+        var captured: [Capture] = []
+
+        let excluded = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                         excludedApps: { ["com.example.vault"] },
+                                         frontmostBundleID: { "com.example.vault" })
+        excluded.onCapture = { c, _ in captured.append(c) }
+        pb.write("from the user's own excluded app")
+        excluded.poll()
+        XCTAssertEqual(captured, [], "a user-added app must be skipped")
+
+        let notExcluded = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                            excludedApps: { ["com.example.vault"] },
+                                            frontmostBundleID: { "com.apple.Passwords" })
+        notExcluded.onCapture = { c, _ in captured.append(c) }
+        pb.write("hunter2")
+        notExcluded.poll()
+        XCTAssertEqual(captured, [.text("hunter2")],
+                       "an app the user removed from the list must be captured again")
+    }
+
+    func testExcludedSetIsReReadOnEveryPollWithoutRebuildingTheMonitor() throws {
+        // Editing the list in Settings must take effect on the next poll, with no
+        // app restart — same contract as the Stage 2 capture policy.
+        let pb = FakePasteboard()
+        var excluded: Set<String> = []
+        let monitor = PasteboardMonitor(pasteboard: pb, now: { 1 },
+                                        excludedApps: { excluded },
+                                        frontmostBundleID: { "com.example.vault" })
+        var captured: [Capture] = []
+        monitor.onCapture = { c, _ in captured.append(c) }
+
+        pb.write("before the user excluded it")
+        monitor.poll()
+        XCTAssertEqual(captured, [.text("before the user excluded it")])
+
+        excluded.insert("com.example.vault")
+        pb.write("after the user excluded it")
+        monitor.poll()
+        XCTAssertEqual(captured, [.text("before the user excluded it")],
+                       "the same monitor instance must pick up the list change")
     }
 
     func testConcealedImageIsAlsoSkipped() throws {

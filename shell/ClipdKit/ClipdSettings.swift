@@ -32,6 +32,16 @@ public final class ClipdSettings: ObservableObject {
     /// Log size above which the core compacts.
     public static let defaultCompactThresholdBytes: UInt64 = 4 * 1024 * 1024  // 4 MB
 
+    /// Apps whose copies are skipped by SOURCE, because they don't tag the
+    /// pasteboard as concealed (see PasteboardMonitor). These were compiled into
+    /// the monitor before the list became user-editable; the monitor now carries
+    /// no list of its own, so this table is what keeps the fallback alive on a
+    /// fresh install. Editable and removable — it is a heuristic, not security.
+    public static let defaultExcludedSourceApps = [
+        "com.apple.Passwords",        // macOS 15+ Passwords app
+        "com.apple.keychainaccess",   // Keychain Access
+    ]
+
     private enum Key {
         static let maxEntries = "clipd.maxEntries"
         static let maxBytes = "clipd.maxBytes"
@@ -46,6 +56,7 @@ public final class ClipdSettings: ObservableObject {
         static let capturesText = "clipd.capturesText"
         static let capturesImages = "clipd.capturesImages"
         static let capturesFiles = "clipd.capturesFiles"
+        static let excludedSourceApps = "clipd.excludedSourceApps"
     }
 
     private let defaults: UserDefaults
@@ -106,6 +117,17 @@ public final class ClipdSettings: ObservableObject {
         didSet { defaults.set(capturesFiles, forKey: Key.capturesFiles) }
     }
 
+    /// Bundle ids whose copies PasteboardMonitor skips by source app. Stored as an
+    /// Array (UserDefaults has no Set) and kept ordered so the Settings list has a
+    /// stable row order; the monitor consumes `excludedSourceAppIDs` below.
+    ///
+    /// This is a frontmost-app check with a poll-interval race that only covers the
+    /// apps listed here — a best-effort heuristic, NOT security. The store is still
+    /// local plaintext.
+    @Published public var excludedSourceApps: [String] {
+        didSet { defaults.set(excludedSourceApps, forKey: Key.excludedSourceApps) }
+    }
+
     /// `defaults` is injectable so tests run against a throwaway suite instead of
     /// the user's real preferences.
     public init(defaults: UserDefaults = .standard) {
@@ -124,6 +146,28 @@ public final class ClipdSettings: ObservableObject {
         capturesText = defaults.object(forKey: Key.capturesText) as? Bool ?? true
         capturesImages = defaults.object(forKey: Key.capturesImages) as? Bool ?? true
         capturesFiles = defaults.object(forKey: Key.capturesFiles) as? Bool ?? true
+        excludedSourceApps = Self.stringList(defaults, Key.excludedSourceApps,
+                                             default: Self.defaultExcludedSourceApps)
+    }
+
+    // MARK: - Excluded source apps
+    //
+    // The list logic lives here rather than in the Settings UI so the shell view
+    // stays a view: add/remove are the only two operations, both pure.
+
+    /// What PasteboardMonitor's provider hands back on each poll.
+    public var excludedSourceAppIDs: Set<String> { Set(excludedSourceApps) }
+
+    /// Append a bundle id, silently ignoring a duplicate (no reorder) or a blank
+    /// entry. Matching is exact, the same comparison PasteboardMonitor makes.
+    public func addExcludedApp(_ bundleID: String) {
+        let id = bundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty, !excludedSourceApps.contains(id) else { return }
+        excludedSourceApps.append(id)
+    }
+
+    public func removeExcludedApp(_ bundleID: String) {
+        excludedSourceApps.removeAll { $0 == bundleID }
     }
 
     /// The CapturePolicy PasteboardMonitor should apply right now, assembled from
@@ -160,5 +204,14 @@ public final class ClipdSettings: ObservableObject {
             return fallback
         }
         return UInt64(stored)
+    }
+
+    /// A list where **empty is meaningful** and must survive: a user who removes
+    /// every excluded app has made a real choice, and re-seeding the defaults on
+    /// the next launch would silently undo it. Only a missing key (fresh install)
+    /// or a non-list value (corrupt plist) falls back.
+    private static func stringList(_ defaults: UserDefaults, _ key: String,
+                                   default fallback: [String]) -> [String] {
+        defaults.object(forKey: key) as? [String] ?? fallback
     }
 }

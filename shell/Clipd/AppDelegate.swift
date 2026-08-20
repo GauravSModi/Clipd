@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         monitor = PasteboardMonitor(
             pasteboard: SystemPasteboard(),
             policy: { [settings] in settings.capturePolicy },
+            excludedApps: { [settings] in settings.excludedSourceAppIDs },
             frontmostBundleID: { NSWorkspace.shared.frontmostApplication?.bundleIdentifier })
         controller = HistoryController(clipboard: clipboard,
                                        monitor: monitor,
@@ -246,7 +247,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// search panel's auto-dismiss hook and must stay panel-only.
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 280),
+            // Sized for the tallest tab (Capture, which carries the excluded-apps
+            // list); SettingsView's own frame must match.
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 460),
                                   styleMask: [.titled, .closable],
                                   backing: .buffered,
                                   defer: false)

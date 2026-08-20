@@ -262,6 +262,15 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > both the status menu and a new Capture tab in Settings. A disallowed kind skips
 > the copy entirely rather than falling through to the next representation. No
 > C++ core, C API, header, or log change.
+>
+> **Stage 3 (excluded source apps, 2026-08-20)** is shell-only: the hardcoded
+> source-app skip list becomes a user-editable, persisted list in `ClipdSettings`,
+> injected into `PasteboardMonitor` as a provider re-read on every poll. Seeded
+> with the two Apple ids on a fresh store; an emptied list is honored, not
+> re-seeded. Add/remove via an app picker in the Capture tab. This remains the
+> heuristic described under Pasteboard security — a frontmost-app check with a poll
+> race, **not** security — and the tab's own copy says so. No C++ core, C API,
+> header, or log change.
 
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).

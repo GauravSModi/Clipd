@@ -97,6 +97,33 @@ the first cut of the icon swap — fixed by consuming the sink's own parameter).
 Run-the-app verified: pause/resume from the status menu, images/files toggles in
 Settings, and the icon/menu-checkmark agreement (after the fix above) all work.
 
+**Stage 3 (editable excluded source apps) is shipped**, shell-only: the
+`private static let excludedSourceApps` set is gone from `PasteboardMonitor`;
+the monitor now takes an injected `() -> Set<String>` provider (same shape as
+Stage 2's `CapturePolicy` provider, re-read every poll, so a Settings edit
+applies on the next tick with no restart). Its default is **permissive (`[]`)** —
+the pure layer carries no baked-in list, and `ClipdSettings.defaultExcludedSourceApps`
+is now the single source of the two Apple ids (a test pins them so the fallback
+can't be dropped silently). The list persists as an `[String]` under
+`clipd.excludedSourceApps` (UserDefaults has no `Set`; the Array also gives the UI
+a stable row order) and `excludedSourceAppIDs` is what the provider hands back.
+An **absent key** seeds the two Apple defaults; a **stored empty array is honored
+and never re-seeded**, so removing every app is a real, persisted choice. Add/remove
+live on `ClipdSettings` (`addExcludedApp` trims, de-dupes exactly, and never
+reorders; matching stays exact, as the monitor's `Set.contains` always was), so the
+view holds no list logic. UI is an `NSOpenPanel` app picker + `−` button in the
+Capture tab (`shell/Clipd/ExcludedAppsView.swift`); display names resolve via
+`NSWorkspace` with a raw-bundle-id fallback, and that file lives in the **Clipd
+target, not ClipdKit**, because NSWorkspace/NSOpenPanel are AppKit. The tab carries
+the honest framing in visible copy (best-effort frontmost check with a timing
+window, **not** security) plus a caption warning that removing the Apple rows can
+leave passwords in the plaintext history. The Settings window grew to 460×460 for
+the list. Run-the-app verified (2026-08-20): add/remove changes capture without a
+restart, the list survives quit/relaunch, and both tabs lay out cleanly.
+**Watch:** the Stage 2 per-kind filters persist like pause does, so a filter left
+off during testing reads later as "the app captures nothing" — check
+`defaults read com.clipd.Clipd` (`clipd.capturesText` etc.) before debugging capture.
+
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,
 **flag the conflict** — don't silently follow either one.
@@ -212,10 +239,12 @@ xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
   `TransientType` is the third-party nspasteboard convention (1Password, Chrome,
   Bitwarden honor it). **Apple's Passwords app / Keychain do NOT tag** — a copied
   password is a bare `public.utf8-plain-text` string. The fallback skips copies
-  made while a known secret app is frontmost (`excludedSourceApps` in
-  `PasteboardMonitor`: `com.apple.Passwords`, `com.apple.keychainaccess`) — a
-  source-app heuristic with a ~0.5s poll race, **not** security. Don't overclaim
-  it; the real fix is encryption-at-rest.
+  made while a known secret app is frontmost — a **user-editable** list, seeded
+  with `com.apple.Passwords` + `com.apple.keychainaccess` from
+  `ClipdSettings.defaultExcludedSourceApps` and injected into `PasteboardMonitor`.
+  It stays a source-app heuristic with a ~0.5s poll race, **not** security, and the
+  user can now remove the seeded apps entirely. Don't overclaim it; the real fix is
+  encryption-at-rest.
 - **Files captured by reference, not value.** A file copy stores its path only;
   a moved/deleted file can't be pasted back. Document the caveat; don't
   silently switch to copying contents.

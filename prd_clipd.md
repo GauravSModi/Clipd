@@ -227,6 +227,42 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > counts toward the byte budget and can push total on-disk usage above it (pinned
 > entries are never evicted to reclaim space).
 
+> **Post-v1 settings amendment (2026-08-18).** Scopes the v1 non-goal **"Settings
+> UI beyond the essentials"**. It is not lifted wholesale: it is replaced by a
+> **bounded, enumerated** settings surface, delivered as a staged batch. Only
+> these are in scope —
+> - **Global hotkey** rebinding (the recorder from the existing hotkey library).
+> - **Capture gates:** pause/resume capture, and per-kind capture filters
+>   (text / image / file).
+> - **Excluded source apps:** the hardcoded bundle-id set becomes user-editable.
+>   This remains the *heuristic* described under Pasteboard security — a
+>   frontmost-app check with a poll race, **not** security. The UI copy must not
+>   imply otherwise.
+> - **History caps:** count and byte budget. Already FR6 ("Configurable max
+>   history size"), so this makes an existing requirement reachable rather than
+>   adding one.
+> - **Retention:** clear-on-quit and age-based expiry.
+> - **Search filters:** by content type, and by source app (which first requires
+>   capturing the source app on new entries).
+>
+> Anything past that list — themes, sync, per-app rules, scripting — **stays a
+> non-goal**. The point of the original non-goal was to keep the app from growing
+> a preferences maze; enumerating the surface preserves that intent while making
+> the already-specified FR6 configurability actually reachable.
+>
+> **Stage 1 (settings foundation, 2026-08-18)** is shell-only: a `ClipdSettings`
+> store in ClipdKit (typed accessors over UserDefaults, explicit defaults, a
+> Combine change signal), a tabbed Settings window hosted in an `NSWindow`, a
+> "Settings…" status-menu item, and the hotkey wired through as the pilot
+> setting. No C++ core, C API, header, or log change.
+>
+> **Stage 2 (capture gates, 2026-08-18)** is shell-only: pause/resume capture and
+> per-kind capture filters (text/image/file), both a gate `PasteboardMonitor`
+> consults via a pure `CapturePolicy` value. Pause is persisted and exposed from
+> both the status menu and a new Capture tab in Settings. A disallowed kind skips
+> the copy entirely rather than falling through to the next representation. No
+> C++ core, C API, header, or log change.
+
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).
 - Recovery correctness: demonstrate clean truncation after a simulated torn write.

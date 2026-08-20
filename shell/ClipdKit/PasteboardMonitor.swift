@@ -75,14 +75,22 @@ public final class PasteboardMonitor {
     /// NSWorkspace-backed closure, the pure layer defaults to nil (no skip).
     private let frontmostBundleID: () -> String?
 
+    /// The pause flag + per-kind filters, read fresh on every poll. A provider
+    /// closure (not a stored value or a ClipdSettings reference) so a settings
+    /// change takes effect immediately without rebuilding the monitor, and this
+    /// class stays pure/testable with a hand-built policy.
+    private let policy: () -> CapturePolicy
+
     /// Called with (capture, epoch-ms timestamp) for each new, non-excluded copy.
     public var onCapture: ((Capture, Int64) -> Void)?
 
     public init(pasteboard: PasteboardReading,
                 now: @escaping () -> Int64 = clipdNowMs,
+                policy: @escaping () -> CapturePolicy = { .capturingEverything },
                 frontmostBundleID: @escaping () -> String? = { nil }) {
         self.pasteboard = pasteboard
         self.now = now
+        self.policy = policy
         self.frontmostBundleID = frontmostBundleID
         // Seed from the current counter so whatever already sits on the pasteboard
         // at launch isn't re-ingested; only copies made afterward are captured.
@@ -111,19 +119,18 @@ public final class PasteboardMonitor {
             return false
         }
 
-        if let path = pasteboard.fileURLPath(), !path.isEmpty {
-            emit(.file(path: path))
-            return true
-        }
-        if let text = pasteboard.string(), !text.isEmpty {
-            emit(.text(text))
-            return true
-        }
-        if let image = pasteboard.imageCapture() {
-            emit(.image(image))
-            return true
-        }
-        return false
+        // Read fresh so a pause/filter change made in Settings or the status menu
+        // takes effect on the very next poll. Checked before reading pasteboard
+        // contents (the expensive part) so a paused tick stays cheap.
+        let policy = self.policy()
+        guard !policy.isPaused else { return false }
+
+        guard let capture = clipdSelectCapture(file: pasteboard.fileURLPath(),
+                                               text: pasteboard.string(),
+                                               image: pasteboard.imageCapture(),
+                                               policy: policy) else { return false }
+        emit(capture)
+        return true
     }
 
     private func emit(_ capture: Capture) {

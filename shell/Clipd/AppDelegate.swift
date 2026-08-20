@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import ApplicationServices
 import ServiceManagement
@@ -12,7 +13,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var statusItem: NSStatusItem!
     private var statusMenu: NSMenu!
     private var launchAtLoginItem: NSMenuItem!
+    private var pauseCaptureItem: NSMenuItem!
+    /// Held so menuNeedsUpdate can restate the current hotkey in its title.
+    private var searchItem: NSMenuItem!
     private var panel: NSPanel!
+    /// Built lazily on first "Settings…" and reused (isReleasedWhenClosed = false),
+    /// so closing it keeps the recorded shortcut's view state rather than tearing
+    /// the hosting view down.
+    private var settingsWindow: NSWindow?
     private var pollTimer: Timer?
     private var suppressAutoDismiss = false
     /// Local monitor for ↑/↓ list navigation while the query field stays focused.
@@ -27,13 +35,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var controller: HistoryController!
     private var model: SearchModel!
 
-    private let maxEntries = 10_000
-    private let compactThresholdBytes: UInt64 = 4 * 1024 * 1024     // 4 MB
-    /// Total live byte budget (sum of Entry.byte_size). Images are MB-scale, so
-    /// an unbounded byte budget would let a few large copies fill the disk.
-    private let maxBytes: UInt64 = 256 * 1024 * 1024                // 256 MB
-    /// Per-image cap so a single huge TIFF can't dominate the whole budget.
-    private let maxBlobBytes: UInt64 = 50 * 1024 * 1024             // 50 MB
+    /// Persisted settings (caps, first-run flags, capture policy). ClipdSettings
+    /// owns the default table the caps used to be hardcoded from; caps are read
+    /// once here at launch (changing a cap live is a later stage's job), but the
+    /// capture policy is read fresh on every poll via a provider closure.
+    private let settings = ClipdSettings.shared
+    /// Keeps the status-item icon in sync with pause state changed from the
+    /// Settings window, not just from the status menu. Held for the process
+    /// lifetime.
+    private var settingsSubscriptions: Set<AnyCancellable> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let clipboard = makeClipboard() else {
@@ -43,10 +53,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         self.clipboard = clipboard
         monitor = PasteboardMonitor(
             pasteboard: SystemPasteboard(),
+            policy: { [settings] in settings.capturePolicy },
             frontmostBundleID: { NSWorkspace.shared.frontmostApplication?.bundleIdentifier })
         controller = HistoryController(clipboard: clipboard,
                                        monitor: monitor,
-                                       compactThresholdBytes: compactThresholdBytes)
+                                       compactThresholdBytes: settings.compactThresholdBytes)
         model = SearchModel(controller: controller)
         model.onActivate = { [weak self] match, requested in
             self?.activate(match, requested: requested)
@@ -79,10 +90,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         let logPath = dir.appendingPathComponent("clipd.log").path
         return try? Clipboard(logPath: logPath,
-                              maxEntries: maxEntries,
-                              compactThresholdBytes: compactThresholdBytes,
-                              maxBytes: maxBytes,
-                              maxBlobBytes: maxBlobBytes)
+                              maxEntries: settings.maxEntries,
+                              compactThresholdBytes: settings.compactThresholdBytes,
+                              maxBytes: settings.maxBytes,
+                              maxBlobBytes: settings.maxBlobBytes)
     }
 
     private func startPolling() {
@@ -97,24 +108,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateStatusIcon()
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "doc.on.clipboard",
-                                   accessibilityDescription: "Clipd")
             button.action = #selector(statusItemClicked)
             button.target = self
             // Need right-clicks too, so we can show the menu instead of the panel.
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
+        // Keep the icon in sync with a pause toggle made in the Settings window,
+        // not just the status menu — both surfaces must agree. Use the value the
+        // sink hands us, not a re-read of settings.captureIsPaused: @Published
+        // publishes from willSet, so re-reading the property from inside the sink
+        // can still observe the PRE-toggle value on the very next run-loop turn —
+        // that was the "icon doesn't flip until the second toggle" bug.
+        settings.$captureIsPaused
+            .sink { [weak self] isPaused in self?.updateStatusIcon(paused: isPaused) }
+            .store(in: &settingsSubscriptions)
 
         statusMenu = NSMenu()
         statusMenu.delegate = self
-        statusMenu.addItem(withTitle: "Search Clipd  (⌘⇧V)",
-                           action: #selector(togglePanel), keyEquivalent: "")
+        searchItem = statusMenu.addItem(withTitle: Self.searchItemTitle,
+                                        action: #selector(togglePanel), keyEquivalent: "")
         statusMenu.addItem(.separator())
+        pauseCaptureItem = statusMenu.addItem(withTitle: "Pause Capture",
+                                              action: #selector(togglePauseCapture),
+                                              keyEquivalent: "")
         launchAtLoginItem = statusMenu.addItem(withTitle: "Launch at Login",
                                                action: #selector(toggleLaunchAtLogin),
                                                keyEquivalent: "")
         statusMenu.addItem(.separator())
+        statusMenu.addItem(withTitle: "Settings…",
+                           action: #selector(showSettings), keyEquivalent: ",")
         statusMenu.addItem(withTitle: "Clear History…",
                            action: #selector(clearHistory), keyEquivalent: "")
         statusMenu.addItem(.separator())
@@ -123,38 +147,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         statusMenu.items.forEach { $0.target = self }
     }
 
-    // MARK: - Launch at login
-
-    /// Refresh the checkbox from the real service state each time the menu opens,
-    /// so it never drifts from what the system actually has registered.
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        launchAtLoginItem.state = isLaunchAtLoginEnabled ? .on : .off
+    /// `doc.on.clipboard` (the normal icon) while capturing, `pause.circle` while
+    /// paused. There is no slashed-clipboard SF Symbol, so a distinct pause glyph
+    /// reads more clearly as "paused" than the plain `clipboard` symbol did; the
+    /// status MENU item's checkmark remains the unambiguous indicator either way.
+    private func updateStatusIcon(paused: Bool = ClipdSettings.shared.captureIsPaused) {
+        let symbolName = paused ? "pause.circle" : "doc.on.clipboard"
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Clipd")
+        // pause.circle reads as smaller than doc.on.clipboard at the default menu-
+        // bar (.small) scale — bump it to .large so the paused state is easy to
+        // spot at a glance, matching the doc.on.clipboard glyph's visual weight.
+        statusItem.button?.image = paused
+            ? image?.withSymbolConfiguration(.init(scale: .large))
+            : image
     }
 
-    private var isLaunchAtLoginEnabled: Bool {
-        SMAppService.mainApp.status == .enabled
+    // MARK: - Launch at login
+
+    /// Refresh from the real state each time the menu opens: the checkbox from the
+    /// login-service status (so it never drifts from what the system has
+    /// registered), and the search item's label from the currently bound shortcut
+    /// (so rebinding it in Settings doesn't leave a stale hint behind).
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        // Reconcile with the system before showing the checkbox (a change made in
+        // System Settings ▸ Login Items happens behind the app's back).
+        ClipdLoginItem.shared.refresh()
+        launchAtLoginItem.state = ClipdLoginItem.shared.isEnabled ? .on : .off
+        searchItem.title = Self.searchItemTitle
+        pauseCaptureItem.state = settings.captureIsPaused ? .on : .off
+    }
+
+    /// A frequent, transient action, so it lives in the status menu (in addition
+    /// to the Settings checkbox — both read/write the same ClipdSettings property).
+    @objc private func togglePauseCapture() {
+        settings.captureIsPaused.toggle()
+    }
+
+    /// "Search Clipd  (⌘⇧V)", or just "Search Clipd" when no shortcut is bound.
+    private static var searchItemTitle: String {
+        guard let shortcut = KeyboardShortcuts.getShortcut(for: .toggleClipd) else {
+            return "Search Clipd"
+        }
+        return "Search Clipd  (\(shortcut))"
     }
 
     @objc private func toggleLaunchAtLogin() {
-        let service = SMAppService.mainApp
-        do {
-            if service.status == .enabled {
-                try service.unregister()
-            } else {
-                try service.register()
-            }
-        } catch {
-            NSLog("Clipd: launch-at-login toggle failed: \(error)")
-        }
-        // Re-sync from the real status, so a failed register doesn't desync the UI.
-        launchAtLoginItem.state = isLaunchAtLoginEnabled ? .on : .off
+        let item = ClipdLoginItem.shared
+        item.setEnabled(!item.isEnabled)
+        // setEnabled already fell back to the system state if the call failed, so
+        // a failed register can't leave the checkmark lying.
+        launchAtLoginItem.state = item.isEnabled ? .on : .off
     }
 
     /// One-time onboarding: offer to register as a login item on first launch.
     private func promptLaunchAtLoginIfFirstRun() {
-        let key = "didPromptLaunchAtLogin"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-        UserDefaults.standard.set(true, forKey: key)
+        guard !settings.didPromptLaunchAtLogin else { return }
+        settings.didPromptLaunchAtLogin = true
 
         DispatchQueue.main.async {
             NSApp.activate(ignoringOtherApps: true)
@@ -164,8 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             alert.addButton(withTitle: "Launch at Login")
             alert.addButton(withTitle: "Not Now")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
-            do { try SMAppService.mainApp.register() }
-            catch { NSLog("Clipd: launch-at-login registration failed: \(error)") }
+            ClipdLoginItem.shared.setEnabled(true)
         }
     }
 
@@ -187,6 +234,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     @objc private func quit() {
         NSApp.terminate(nil)
+    }
+
+    // MARK: - Settings
+
+    /// Show the Settings window, building it on first use. Hosts SettingsView in a
+    /// plain NSWindow the same way setupPanel() hosts SearchView — the app is
+    /// AppKit-bootstrapped, so there's no SwiftUI Settings scene to use.
+    ///
+    /// Deliberately NOT given `self` as its delegate: windowDidResignKey is the
+    /// search panel's auto-dismiss hook and must stay panel-only.
+    @objc private func showSettings() {
+        if settingsWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 280),
+                                  styleMask: [.titled, .closable],
+                                  backing: .buffered,
+                                  defer: false)
+            window.title = "Clipd Settings"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: SettingsView())
+            settingsWindow = window
+        }
+        // An .accessory app has to activate explicitly for its window to take focus
+        // (the hotkey recorder is useless without key events).
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.center()
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     // MARK: - Destructive actions (confirmed)
@@ -361,9 +434,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// its own flag (independent of the launch-at-login prompt) so it also fires
     /// for installs that predate this feature; skipped if already trusted.
     private func requestAccessibilityOnFirstRun() {
-        let key = "didRequestAccessibility"
-        guard !UserDefaults.standard.bool(forKey: key) else { return }
-        UserDefaults.standard.set(true, forKey: key)
+        guard !settings.didRequestAccessibility else { return }
+        settings.didRequestAccessibility = true
         guard !AXIsProcessTrusted() else { return }
 
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]

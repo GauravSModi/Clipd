@@ -50,6 +50,53 @@ per-row delete is instant for unpinned and confirmed for pinned. Run-the-app
 verification of the star/trash/clear UI and pin/delete persistence across
 restart is still pending.
 
+**Post-v1 settings + filters batch** — an approved 8-stage schedule (settings
+window, capture gates, editable excluded apps, history caps, retention, type
+filters, source-app capture, source-app filter), one stage per agent. The PRD
+non-goal "Settings UI beyond the essentials" is *scoped*, not lifted, by a dated
+amendment (2026-08-18) that enumerates exactly which settings are in scope.
+**Stage 1 (settings foundation) is shipped** and shell-only: `ClipdSettings` in
+ClipdKit is the single settings store (typed accessors over `UserDefaults` with
+explicit defaults, `ObservableObject` change signal, injectable suite for tests);
+it owns the cap defaults that used to be `private let` on `AppDelegate`, plus the
+two first-run flags under their original key strings. The Settings window is a
+`TabView` in an `NSWindow` + `NSHostingView` (no SwiftUI `Settings` scene — the
+app is AppKit-bootstrapped), opened from a "Settings…" status-menu item. The
+global hotkey is the one setting wired through; `KeyboardShortcuts` owns its own
+persistence, so it is not mirrored into `ClipdSettings`. Login-item state is owned
+by one `ObservableObject` (`ClipdLoginItem`) shared by the Settings checkbox and
+the status-menu item — a computed `Binding` over `SMAppService.status` never
+redraws, and re-reading that status immediately after register/unregister can
+still report the OLD value and snap the control back. Run-the-app verified
+(2026-08-18): the Settings window opens from the status menu, rebinding the
+hotkey works and survives a restart, Reset to Default restores ⌘⇧V, the status
+menu's shortcut hint follows the new binding, and the login-item toggle agrees
+across both surfaces.
+
+**Stage 2 (capture gates) is shipped**, shell-only: a new pure `CapturePolicy`
+value in ClipdKit (pause flag + per-kind allow flags) plus `clipdSelectCapture`,
+the pure decision function `PasteboardMonitor.poll()` now calls instead of its old
+inline priority chain. The pause gate sits *after* `lastChangeCount` advances, so a
+copy made while paused is dropped for good, never replayed on resume. A
+disallowed kind **skips the copy entirely** — no fall-through to the next
+representation (unchecking "files" means a Finder ⌘C records nothing, not its
+filename). `PasteboardMonitor` reads the policy through an injected
+`() -> CapturePolicy` provider, re-evaluated every poll, so a settings change
+takes effect without rebuilding the monitor. Pause is persisted in `ClipdSettings`
+(`captureIsPaused` + `capturesText`/`capturesImages`/`capturesFiles`) — it
+survives a restart on purpose, since it has a Settings checkbox and is a setting.
+Surfaced from both a "Pause Capture" status-menu item (checkmark) and a new
+**Capture** tab in Settings; both read/write the same `ClipdSettings` property, so
+they can't disagree. The status-item icon swaps `doc.on.clipboard` → `pause.circle`
+(shown at `.large` symbol scale — the default `.small` menu-bar scale reads
+noticeably smaller than the doc icon) while paused; there is no slashed-clipboard
+SF Symbol. **Watch:** `@Published`'s projected publisher fires from `willSet`, so a
+Combine sink that discards its emitted value and re-reads the `ClipdSettings`
+property can observe the pre-change value on the very next run-loop turn (this bit
+the first cut of the icon swap — fixed by consuming the sink's own parameter).
+Run-the-app verified: pause/resume from the status menu, images/files toggles in
+Settings, and the icon/menu-checkmark agreement (after the fix above) all work.
+
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,
 **flag the conflict** — don't silently follow either one.
@@ -138,7 +185,8 @@ xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
   - Log v1: existing legacy (header-less) text-only logs replay as TEXT and are
     migrated to v1 on first `start()`.
 - **Swift shell stays thin** — UI, pasteboard polling, hotkey, one serial
-  `DispatchQueue`, and presentation-side UX (paste-back, keyboard nav,
+  `DispatchQueue`, UI-preference persistence (`ClipdSettings` over `UserDefaults`
+  — never history data), and presentation-side UX (paste-back, keyboard nav,
   affordances, launch-at-login, thumbnails, the pinned-section split + pin/
   delete/clear controls + their confirmations) only; no dedup/scoring/storage.
   Every C call is serialized on that queue, and search results are copied into

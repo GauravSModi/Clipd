@@ -271,6 +271,18 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > heuristic described under Pasteboard security — a frontmost-app check with a poll
 > race, **not** security — and the tab's own copy says so. No C++ core, C API,
 > header, or log change.
+>
+> **Stage 4 (history caps, 2026-08-20)** is the first stage of the batch to touch
+> C++, making the already-specified **FR6** ("configurable max history size")
+> reachable. `ClipStore` gains a limits setter that evicts down immediately —
+> a second eviction trigger alongside `upsert`, with replay still faithful because
+> replay never calls it. A new `clipd_set_limits` carries the two caps `ClipStore`
+> owns; `max_blob_bytes` stays a create-time ingest rule and is not settable, since
+> lowering it could not remove an image already stored. The setter does not rewrite
+> the log. A new History tab exposes both caps with bounded controls and no
+> "unlimited" option, confirming a reduction only when it would actually evict —
+> and naming an **upper bound**, because pinned entries are exempt from both caps.
+> No log-format, identity, or blob-store change.
 
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).

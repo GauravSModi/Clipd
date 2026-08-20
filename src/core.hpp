@@ -71,6 +71,14 @@ class Core {
   // log and GC every now-unreferenced blob.
   void clear();
 
+  // Replace the live caps and evict down to them at once. `max_entries` 0 = no
+  // count cap, `max_bytes` 0 = unbounded. Eviction authority stays in ClipStore;
+  // this only forwards. The log is untouched — evicted records are dropped by
+  // the next compaction, not here. `max_blob_bytes` is deliberately NOT settable:
+  // it is an ingest-side reject rule, so lowering it could not retroactively
+  // remove an image already stored.
+  void set_limits(size_t max_entries, uint64_t max_bytes);
+
   // The bytes of the blob with id `id`, or nullopt if absent.
   std::optional<std::string> read_blob(const std::string& id) const;
 

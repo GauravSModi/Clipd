@@ -154,6 +154,21 @@ public final class Clipboard {
         }
     }
 
+    /// Replace the live caps and evict down to them at once (not on the next
+    /// add). `maxEntries` 0 = no count cap, `maxBytes` 0 = unbounded. Pinned
+    /// entries are exempt from both, so a cap can be held above its limit.
+    ///
+    /// This does not rewrite the log — evicted records are dropped at the next
+    /// compaction — and it does not change `maxBlobBytes`, which is an
+    /// ingest-side reject rule fixed at creation.
+    public func setLimits(maxEntries: Int, maxBytes: UInt64) throws {
+        try queue.sync {
+            if clipd_set_limits(core, maxEntries, maxBytes) != 0 {
+                throw ClipdError.mutationFailed
+            }
+        }
+    }
+
     /// Fetch the bytes of the blob `id` (an image Match's id), copied out of C++
     /// memory. Returns nil if the blob is missing.
     public func readBlob(id: String) -> Data? {

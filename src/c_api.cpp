@@ -115,6 +115,16 @@ int clipd_clear(ClipdCore* core) {
   }
 }
 
+int clipd_set_limits(ClipdCore* core, size_t max_entries, uint64_t max_bytes) {
+  if (!core) return -1;
+  try {
+    core->core.set_limits(max_entries, max_bytes);
+    return 0;
+  } catch (...) {
+    return -1;
+  }
+}
+
 const uint8_t* clipd_read_blob(ClipdCore* core, const char* id, size_t* out_len) {
   if (!core || !id || !out_len) return nullptr;
   try {

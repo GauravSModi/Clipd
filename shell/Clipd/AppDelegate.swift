@@ -36,9 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var model: SearchModel!
 
     /// Persisted settings (caps, first-run flags, capture policy). ClipdSettings
-    /// owns the default table the caps used to be hardcoded from; caps are read
-    /// once here at launch (changing a cap live is a later stage's job), but the
-    /// capture policy is read fresh on every poll via a provider closure.
+    /// owns the default table the caps used to be hardcoded from. The caps seed
+    /// the core at launch and are then applied live by observeHistoryLimits();
+    /// the capture policy is read fresh on every poll via a provider closure.
     private let settings = ClipdSettings.shared
     /// Keeps the status-item icon in sync with pause state changed from the
     /// Settings window, not just from the status menu. Held for the process
@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             self?.confirmDeletePinned(match)
         }
 
+        observeHistoryLimits()
         startPolling()
         setupStatusItem()
         setupPanel()
@@ -95,6 +96,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                               compactThresholdBytes: settings.compactThresholdBytes,
                               maxBytes: settings.maxBytes,
                               maxBlobBytes: settings.maxBlobBytes)
+    }
+
+    /// Apply a cap change to the running core, so retuning a limit never needs a
+    /// restart. This is the ONLY path that calls setLimits: the confirmation
+    /// writes to ClipdSettings, and these sinks apply what was written.
+    ///
+    /// Two Combine hazards, both handled here:
+    ///   * @Published publishes from willSet, so the property being changed still
+    ///     reads as its PRE-change value inside the sink. Each sink therefore uses
+    ///     its own emitted value for the property that moved and reads the OTHER
+    ///     one off `settings` (which is not mid-assignment). Re-reading the
+    ///     changing property is the bug that bit the Stage 2 status icon.
+    ///   * A @Published sink emits the current value on subscribe; dropFirst()
+    ///     avoids a redundant setLimits at launch with the very values
+    ///     clipd_create was just handed.
+    private func observeHistoryLimits() {
+        settings.$maxEntries
+            .dropFirst()
+            .sink { [weak self] newMaxEntries in
+                guard let self else { return }
+                try? self.controller.setLimits(maxEntries: newMaxEntries,
+                                               maxBytes: self.settings.maxBytes)
+            }
+            .store(in: &settingsSubscriptions)
+
+        settings.$maxBytes
+            .dropFirst()
+            .sink { [weak self] newMaxBytes in
+                guard let self else { return }
+                try? self.controller.setLimits(maxEntries: self.settings.maxEntries,
+                                               maxBytes: newMaxBytes)
+            }
+            .store(in: &settingsSubscriptions)
+    }
+
+    /// Confirm a cap change that would evict, then persist it (the observers
+    /// above do the applying). Returns whether it was applied, so the History tab
+    /// can snap its controls back on a cancel.
+    ///
+    /// Only a reduction that would ACTUALLY evict is confirmed — raising a cap, or
+    /// lowering one that is still above the live set, applies silently.
+    private func applyHistoryLimits(maxEntries: Int, maxBytes: UInt64) -> Bool {
+        // Effectively unreachable: clipd_stats only fails on a NULL handle, and a
+        // failed core aborts launch. If it ever does fail we can't tell whether
+        // this evicts, and evicting without asking is the worse outcome.
+        guard let stats = try? controller.stats() else {
+            NSLog("Clipd: couldn't read stats; leaving the history limits unchanged")
+            return false
+        }
+
+        let reduction = clipdLimitReduction(liveCount: stats.entryCount,
+                                            liveBytes: stats.storeBytes,
+                                            maxEntries: maxEntries,
+                                            maxBytes: maxBytes)
+        if reduction != .none {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = reduction.messageText
+            alert.informativeText = reduction.informativeText
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Reduce Limit")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        }
+
+        // Guarded: @Published fires on any assignment, including a same-value one,
+        // which would re-run the observer and rewrite UserDefaults for nothing.
+        if settings.maxEntries != maxEntries { settings.maxEntries = maxEntries }
+        if settings.maxBytes != maxBytes { settings.maxBytes = maxBytes }
+        return true
     }
 
     private func startPolling() {
@@ -255,7 +326,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                                   defer: false)
             window.title = "Clipd Settings"
             window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: SettingsView())
+            window.contentView = NSHostingView(rootView: SettingsView(
+                onCommitHistoryLimits: { [weak self] maxEntries, maxBytes in
+                    self?.applyHistoryLimits(maxEntries: maxEntries,
+                                             maxBytes: maxBytes) ?? false
+                }))
             settingsWindow = window
         }
         // An .accessory app has to activate explicitly for its window to take focus

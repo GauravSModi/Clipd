@@ -398,3 +398,93 @@ TEST_F(CApiTest, PinDeleteClearNullArgsAreSafe) {
 }
 
 }  // namespace
+
+// --- clipd_set_limits -------------------------------------------------------
+
+TEST_F(CApiTest, SetLimitsEvictsDownImmediately) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_EQ(clipd_add(core, ("e" + std::to_string(i)).c_str(), i + 1), 0);
+  }
+  ClipdStats before{};
+  ASSERT_EQ(clipd_stats(core, &before), 0);
+  EXPECT_EQ(before.entry_count, 10u);
+
+  // No add follows: the cap change itself has to evict.
+  ASSERT_EQ(clipd_set_limits(core, 3, 0), 0);
+
+  ClipdStats after{};
+  ASSERT_EQ(clipd_stats(core, &after), 0);
+  EXPECT_EQ(after.entry_count, 3u);
+
+  ClipdResults* r = clipd_search(core, "", 20, 100);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 3u);
+  EXPECT_STREQ(r->matches[0].text, "e9");  // the least-recent went first
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, SetLimitsAppliesByteBudget) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 0, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  // Text entries: byte_size is the text length, so these are 10 bytes each.
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_EQ(clipd_add(core, ("abcdefgh" + std::to_string(i) + "x").c_str(),
+                        i + 1),
+              0);
+  }
+  ClipdStats before{};
+  ASSERT_EQ(clipd_stats(core, &before), 0);
+  ASSERT_EQ(before.store_bytes, 50u);
+
+  ASSERT_EQ(clipd_set_limits(core, 0, 25), 0);
+
+  ClipdStats after{};
+  ASSERT_EQ(clipd_stats(core, &after), 0);
+  EXPECT_EQ(after.entry_count, 2u);   // 2 x 10 bytes fits under 25
+  EXPECT_EQ(after.store_bytes, 20u);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, SetLimitsSparesPinnedEntries) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "fav", 1), 0);
+  std::string id = only_match_id(core, "fav");
+  ASSERT_EQ(clipd_set_pinned(core, id.c_str(), 1), 0);
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_EQ(clipd_add(core, ("junk" + std::to_string(i)).c_str(), i + 2), 0);
+  }
+
+  ASSERT_EQ(clipd_set_limits(core, 2, 0), 0);
+
+  // The pin is exempt even though it is the least-recent entry.
+  ClipdResults* r = clipd_search(core, "fav", 10, 100);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  EXPECT_EQ(r->matches[0].pinned, 1);
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, SetLimitsRaisingCapDoesNotResurrectEvictedEntries) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 2, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "oldest", 1), 0);
+  ASSERT_EQ(clipd_add(core, "middle", 2), 0);
+  ASSERT_EQ(clipd_add(core, "newest", 3), 0);  // "oldest" evicted at insert
+
+  ASSERT_EQ(clipd_set_limits(core, 100, 0), 0);
+
+  ClipdStats s{};
+  ASSERT_EQ(clipd_stats(core, &s), 0);
+  EXPECT_EQ(s.entry_count, 2u);  // the live set is in memory; nothing replays here
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, SetLimitsNullHandleIsSafe) {
+  // Must not crash, and must report failure like every other int-returning call.
+  EXPECT_NE(clipd_set_limits(nullptr, 10, 1024), 0);
+}

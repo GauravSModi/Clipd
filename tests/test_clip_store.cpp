@@ -267,3 +267,110 @@ TEST(ClipStore, ClearUnpinnedKeepsPinned) {
   EXPECT_EQ(texts(s), (std::vector<std::string>{"b"}));
   EXPECT_EQ(s.total_bytes(), 7u);  // only the pinned entry's bytes remain
 }
+
+// --- set_limits: the second eviction trigger --------------------------------
+//
+// Eviction used to happen only in upsert(). set_limits() is the second trigger:
+// a cap the user lowers must take effect at once, not on the next copy. Replay
+// stays faithful because replay never calls set_limits — it constructs the store
+// with the already-current caps and drives everything through upsert().
+
+TEST(ClipStore, SetLimitsLowersCountAndEvictsImmediately) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1));
+  s.upsert(mk("b", 2));
+  s.upsert(mk("c", 3));
+  s.upsert(mk("d", 4));
+  s.set_limits(2, 0);  // no further upsert: the reduction itself must evict
+  EXPECT_EQ(s.size(), 2u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"d", "c"}));  // least-recent go
+}
+
+TEST(ClipStore, SetLimitsLowersByteBudgetAndEvictsImmediately) {
+  ClipStore s(/*max_entries=*/0, /*max_bytes=*/0);
+  s.upsert(mk("a", 1, 40));
+  s.upsert(mk("b", 2, 40));
+  s.upsert(mk("c", 3, 40));
+  EXPECT_EQ(s.total_bytes(), 120u);
+  s.set_limits(0, 100);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"c", "b"}));
+  EXPECT_EQ(s.total_bytes(), 80u);
+}
+
+TEST(ClipStore, SetLimitsSparesPinnedUnderCountCap) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1)); s.set_pinned("a", true);  // pinned AND least-recent
+  s.upsert(mk("b", 2));
+  s.upsert(mk("c", 3));
+  s.upsert(mk("d", 4));
+  s.set_limits(2, 0);
+  // "a" is exempt; the victims are the least-recent UNPINNED entries.
+  EXPECT_EQ(s.size(), 2u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"d", "a"}));
+}
+
+// Pinned is exempt from the byte budget too, so lowering it can leave the store
+// ABOVE the new cap. That is the documented trade-off (pinning many large images
+// can push usage past max_bytes) — assert it rather than "fixing" it.
+TEST(ClipStore, SetLimitsHoldsAboveByteBudgetWhenOnlyPinnedRemain) {
+  ClipStore s(/*max_entries=*/0, /*max_bytes=*/0);
+  s.upsert(mk("p1", 1, 60)); s.set_pinned("p1", true);
+  s.upsert(mk("p2", 2, 60)); s.set_pinned("p2", true);
+  s.upsert(mk("u", 3, 60));
+  s.set_limits(0, 50);
+  // "u" is unpinned but is the most-recent (front), which is never evicted; the
+  // two pins are exempt. Nothing is evictable, so the budget is held above 50.
+  EXPECT_EQ(s.size(), 3u);
+  EXPECT_EQ(s.total_bytes(), 180u);
+}
+
+TEST(ClipStore, SetLimitsHoldsAboveCountCapWhenAllPinned) {
+  ClipStore s(10);
+  s.upsert(mk("a", 1)); s.set_pinned("a", true);
+  s.upsert(mk("b", 2)); s.set_pinned("b", true);
+  s.upsert(mk("c", 3)); s.set_pinned("c", true);
+  s.set_limits(1, 0);  // must terminate, not spin, and must not drop a pin
+  EXPECT_EQ(s.size(), 3u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"c", "b", "a"}));
+}
+
+TEST(ClipStore, SetLimitsRaisingCapEvictsNothingAndResurrectsNothing) {
+  ClipStore s(2);
+  s.upsert(mk("a", 1));
+  s.upsert(mk("b", 2));
+  s.upsert(mk("c", 3));  // "a" evicted at insert time
+  s.set_limits(100, 0);
+  EXPECT_EQ(s.size(), 2u);  // the store is in-memory: raising a cap brings nothing back
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"c", "b"}));
+}
+
+TEST(ClipStore, SetLimitsZeroMeansNoCap) {
+  ClipStore s(/*max_entries=*/2, /*max_bytes=*/100);
+  s.upsert(mk("a", 1, 40));
+  s.upsert(mk("b", 2, 40));
+  EXPECT_EQ(s.size(), 2u);
+  s.set_limits(0, 0);  // both caps off
+  s.upsert(mk("c", 3, 40));
+  s.upsert(mk("d", 4, 40));
+  EXPECT_EQ(s.size(), 4u);
+  EXPECT_EQ(s.total_bytes(), 160u);
+}
+
+TEST(ClipStore, SetLimitsAccessorsReportNewValues) {
+  ClipStore s(10, 1000);
+  s.set_limits(42, 4096);
+  EXPECT_EQ(s.max_entries(), 42u);
+  EXPECT_EQ(s.max_bytes(), 4096u);
+}
+
+// The new caps must govern LATER upserts too, not just the one-shot evict.
+TEST(ClipStore, SetLimitsGovernsSubsequentUpserts) {
+  ClipStore s(100);
+  s.upsert(mk("a", 1));
+  s.set_limits(2, 0);
+  s.upsert(mk("b", 2));
+  s.upsert(mk("c", 3));
+  s.upsert(mk("d", 4));
+  EXPECT_EQ(s.size(), 2u);
+  EXPECT_EQ(texts(s), (std::vector<std::string>{"d", "c"}));
+}

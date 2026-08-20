@@ -41,8 +41,21 @@ class ClipStore {
 
   // Set the pinned flag of the entry with `id` (no-op if absent). Idempotent;
   // does not bump recency. A pinned entry is exempt from eviction. Eviction is
-  // never triggered here — only upsert evicts — so replay stays faithful.
+  // never triggered here — only upsert and set_limits evict — so replay, which
+  // calls neither set_pinned's evict nor set_limits, stays faithful.
   void set_pinned(const std::string& id, bool pinned);
+
+  // Replace both caps and evict down to them AT ONCE, rather than waiting for
+  // the next upsert: a cap the user just lowered must take effect now. Same
+  // zero semantics as the constructor (`max_entries` 0 = no count cap,
+  // `max_bytes` 0 = no byte cap), and the same exemptions — pinned entries and
+  // the most-recent entry are never evicted, so a cap can be held above its
+  // limit here exactly as it can after an upsert.
+  //
+  // This is the second eviction trigger. Replay stays faithful because replay
+  // never calls it: recovery constructs the store with the already-current caps
+  // and drives every record through upsert().
+  void set_limits(size_t max_entries, uint64_t max_bytes);
 
   // The pinned flag of the entry with `id`, or nullopt if there is no such
   // entry. Lets the caller skip redundant writes for an idempotent set.
@@ -68,7 +81,8 @@ class ClipStore {
 
  private:
   // Evict least-recent unpinned entries until both caps hold or nothing is
-  // evictable. Called only from upsert (so replay reproduces eviction exactly).
+  // evictable. Called from upsert and from set_limits — and from nowhere else,
+  // so replay (which only upserts) reproduces eviction exactly.
   void evict();
   // The least-recent (back-most) unpinned entry that is not the most-recent
   // (front) one, or end() if none — pinned entries and the most-recent insert

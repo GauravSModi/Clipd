@@ -172,6 +172,10 @@ void Core::clear() {
   compact();
 }
 
+void Core::set_limits(size_t max_entries, uint64_t max_bytes) {
+  store_.set_limits(max_entries, max_bytes);
+}
+
 std::optional<std::string> Core::read_blob(const std::string& id) const {
   return blobs_.get(id);
 }

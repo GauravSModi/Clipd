@@ -154,6 +154,37 @@ cap off `settings` (the willSet trap again), and both use `.dropFirst()` so
 launch doesn't re-apply the values `clipd_create` was just handed. Run-the-app
 verification of the History tab is still pending.
 
+**Stage 5 (retention: age expiry + clear-on-quit) is shipped** — the second
+stage to open C++, riding the **existing** TOMBSTONE control record rather than
+touching the log format (that's Stage 7's job). `Core::delete_older_than`
+coordinates over existing primitives — `store_.snapshot()` to find victims,
+then per victim `log_.append_control(Tombstone, id)` *before* `store_.remove(id)`
+(matching `Core::remove`'s ordering, so a crash mid-sweep is always consistent)
+— and compacts **only when it removed something**. That compact-on-removal is a
+deliberate departure from Stage 4's `set_limits` precedent: the 4 MB compaction
+threshold can go months without tripping for a low-volume user, and a retention
+feature that never actually removes plaintext from disk would be underdelivering
+on the thing it's for. **`ClipStore` gains nothing** — no timestamp-aware bulk
+op — so `upsert` and `set_limits` remain its only two eviction triggers; expiry
+is a removal path, not a third one. **Pinned entries are exempt**, the same
+exemption `clear()` and eviction use, so a retention period is *not* a blanket
+guarantee that nothing older survives — say so wherever the period is surfaced.
+New `clipd_delete_older_than(core, cutoff_ms, size_t* out_removed)` mirrors
+`clipd_set_limits`'s conventions (NULL handle safe, out-param optional). Shell:
+a new `ClipdRetention` pure helper (day options **with an explicit `Never` row**
+— unlike Stage 4's caps, "never expire" is the current behavior and a normal
+default, not an absurd value) drives a History-tab picker that sweeps at launch
+and hourly; a **shortening** of the period confirms (naming no count — a dry-run
+pass would be needed to know one), lengthening or picking Never applies
+silently. Clear-on-quit is a separate checkbox wired to `applicationWillTerminate`
+→ the existing `clipd_clear` (so it's clear-**unpinned**, best-effort — a force
+quit or abrupt logout never runs it, and it can make quitting visibly slow
+because `clear()` compacts); it confirms only on **enabling**, never at quit
+time. Both alerts' wording is pinned by `RetentionTests` to promise **neither
+permanence nor recoverability** and to name the pinned exemption. Run-the-app
+verification of the History tab's retention picker and clear-on-quit is still
+pending (Stage 4's History-tab verification is also still outstanding).
+
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,
 **flag the conflict** — don't silently follow either one.
@@ -288,11 +319,17 @@ xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
   original bug — `git`-blame the reorder). Text still beats image, so rich text
   with an inline image stays text (the more searchable representation). Document
   surprises rather than reordering silently.
-- **Delete/clear are removal, not secure erase.** The entry leaves the live set
-  at once, but its log records (and any image blob) persist in the plaintext
-  store until the next compaction drops them — not cryptographic erasure. Don't
-  overclaim it as secure deletion.
+- **Delete/clear/expiry are removal, not secure erase.** The entry leaves the
+  live set at once, but its log records (and any image blob) persist in the
+  plaintext store until the next compaction drops them — not cryptographic
+  erasure. Age expiry's sweep compacts whenever it removes anything (unlike
+  `set_limits`), so expired records leave the log promptly, but the freed disk
+  blocks are never overwritten. Don't overclaim any of this as secure deletion.
 - **Pinned is exempt from the byte budget, not just the count cap.** Pinning many
   large images can push total on-disk usage past `max_bytes` (pinned entries are
   never evicted to reclaim space). State the trade-off; don't silently start
   evicting pins.
+- **Pinned entries never expire.** Age-based retention only sweeps unpinned
+  entries, so "delete after N days" is not a guarantee that nothing older
+  survives — a pinned entry from years ago is kept forever. State this
+  wherever a retention period is surfaced; don't imply it's a blanket cutoff.

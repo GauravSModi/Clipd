@@ -283,6 +283,22 @@ This is strictly simpler than a reader-writer lock and removes a whole class of 
 > "unlimited" option, confirming a reduction only when it would actually evict —
 > and naming an **upper bound**, because pinned entries are exempt from both caps.
 > No log-format, identity, or blob-store change.
+>
+> **Stage 5 (retention, 2026-09-05)** adds age-based expiry and clear-on-quit,
+> both named in the settings amendment above. `Core::delete_older_than` sweeps
+> the live set for entries older than a cutoff, tombstoning each one (the same
+> control record `remove()` uses) before dropping it from the store, then
+> compacts only when it removed something — a departure from Stage 4's
+> `set_limits`, made because the 4 MB compaction threshold could otherwise leave
+> expired plaintext on disk indefinitely for a low-volume user. Pinned entries
+> are exempt, so a retention period is not a guarantee that nothing older
+> survives. `clipd_delete_older_than` is a new C-API call returning a removed
+> count; `ClipStore` gains nothing, so `upsert` and `set_limits` remain its only
+> two eviction triggers. The History tab gets a Never/7/30/90/365-day picker
+> (Never is the default and, unlike the Stage 4 caps, a real offered option, not
+> an absurd one) and a clear-on-quit checkbox; both confirm only their
+> destructive direction (shortening the period, enabling clear-on-quit) and
+> apply without a restart. No log-format, identity, or blob-store change.
 
 ## Success metrics (README / interview talking points)
 - Fuzzy search latency over 10k entries (target: <1ms; show the benchmark).

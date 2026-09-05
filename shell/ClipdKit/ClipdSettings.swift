@@ -42,6 +42,12 @@ public final class ClipdSettings: ObservableObject {
         "com.apple.keychainaccess",   // Keychain Access
     ]
 
+    /// Age expiry and clear-on-quit are both OPT-IN: an upgraded install must not
+    /// silently start deleting history. The period lives in ClipdRetention, which
+    /// also owns the option list and the cutoff math.
+    public static let defaultRetentionDays = ClipdRetention.defaultDays
+    public static let defaultClearsHistoryOnQuit = false
+
     private enum Key {
         static let maxEntries = "clipd.maxEntries"
         static let maxBytes = "clipd.maxBytes"
@@ -57,6 +63,8 @@ public final class ClipdSettings: ObservableObject {
         static let capturesImages = "clipd.capturesImages"
         static let capturesFiles = "clipd.capturesFiles"
         static let excludedSourceApps = "clipd.excludedSourceApps"
+        static let retentionDays = "clipd.retentionDays"
+        static let clearsHistoryOnQuit = "clipd.clearsHistoryOnQuit"
     }
 
     private let defaults: UserDefaults
@@ -128,6 +136,23 @@ public final class ClipdSettings: ObservableObject {
         didSet { defaults.set(excludedSourceApps, forKey: Key.excludedSourceApps) }
     }
 
+    /// How long an entry is kept, in days, with **0 meaning never** (the default).
+    /// Applied by a sweep at launch and on a periodic timer — not by the store, and
+    /// not at capture time.
+    ///
+    /// Pinned entries never expire, so this is not a blanket guarantee that nothing
+    /// older survives. Expiry is also removal, not secure erase: the records leave
+    /// the log, but nothing is overwritten.
+    @Published public var retentionDays: Int {
+        didSet { defaults.set(retentionDays, forKey: Key.retentionDays) }
+    }
+
+    /// Whether a normal quit clears the history (keeping pinned entries). It is
+    /// best-effort — a force quit or an abrupt logout never runs it.
+    @Published public var clearsHistoryOnQuit: Bool {
+        didSet { defaults.set(clearsHistoryOnQuit, forKey: Key.clearsHistoryOnQuit) }
+    }
+
     /// `defaults` is injectable so tests run against a throwaway suite instead of
     /// the user's real preferences.
     public init(defaults: UserDefaults = .standard) {
@@ -148,6 +173,14 @@ public final class ClipdSettings: ObservableObject {
         capturesFiles = defaults.object(forKey: Key.capturesFiles) as? Bool ?? true
         excludedSourceApps = Self.stringList(defaults, Key.excludedSourceApps,
                                              default: Self.defaultExcludedSourceApps)
+        // Deliberately NOT positiveInt: 0 is a real value here (Never), not a
+        // corrupt one. sanitize() coerces anything unrecognized to Never — the
+        // direction that deletes nothing — so a corrupt plist can never be read
+        // as an arbitrary retention period and start destroying history.
+        retentionDays = ClipdRetention.sanitize(
+            defaults.object(forKey: Key.retentionDays) as? Int ?? Self.defaultRetentionDays)
+        clearsHistoryOnQuit = defaults.object(forKey: Key.clearsHistoryOnQuit) as? Bool
+            ?? Self.defaultClearsHistoryOnQuit
     }
 
     // MARK: - Excluded source apps

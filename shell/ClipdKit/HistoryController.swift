@@ -56,6 +56,22 @@ public final class HistoryController {
         try clipboard.setLimits(maxEntries: maxEntries, maxBytes: maxBytes)
     }
 
+    /// Run one retention sweep for `retentionDays` (0 = never, a no-op that never
+    /// reaches the core); returns how many entries expired. Pinned entries are
+    /// exempt, so a period is not a guarantee that nothing older survives.
+    ///
+    /// The cutoff comes from the INJECTED clock, which is what lets tests drive
+    /// expiry at a fixed `now` instead of sleeping. Deciding *when* to sweep is
+    /// the caller's job (launch + a periodic timer); the deletion policy is the
+    /// core's.
+    @discardableResult
+    public func sweepExpired(retentionDays: Int) throws -> Int {
+        guard let cutoff = ClipdRetention.cutoffMs(now: now(), days: retentionDays) else {
+            return 0
+        }
+        return try clipboard.deleteOlderThan(cutoffMs: cutoff)
+    }
+
     /// Live entry count, log size, and live byte usage. Public so a settings
     /// surface can tell whether a proposed cap would evict anything before it
     /// applies one; compactIfNeeded below uses the same call.

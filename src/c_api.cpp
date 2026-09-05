@@ -125,6 +125,18 @@ int clipd_set_limits(ClipdCore* core, size_t max_entries, uint64_t max_bytes) {
   }
 }
 
+int clipd_delete_older_than(ClipdCore* core, int64_t cutoff_ms,
+                            size_t* out_removed) {
+  if (!core) return -1;
+  try {
+    const size_t removed = core->core.delete_older_than(cutoff_ms);
+    if (out_removed) *out_removed = removed;  // untouched on the failure paths
+    return 0;
+  } catch (...) {
+    return -1;
+  }
+}
+
 const uint8_t* clipd_read_blob(ClipdCore* core, const char* id, size_t* out_len) {
   if (!core || !id || !out_len) return nullptr;
   try {

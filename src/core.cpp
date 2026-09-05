@@ -172,6 +172,28 @@ void Core::clear() {
   compact();
 }
 
+size_t Core::delete_older_than(int64_t cutoff_ms) {
+  // snapshot() copies, so removing from the store inside the loop is safe. It is
+  // also the live set by definition (ids are unique), which is why there is no
+  // pinned_state() liveness pre-check like remove() makes.
+  const std::vector<Entry> live = store_.snapshot();
+  size_t removed = 0;
+  for (const Entry& e : live) {
+    if (e.pinned || e.timestamp >= cutoff_ms) continue;  // pinned never expires
+    log_.append_control(ControlOp::Tombstone, e.id);     // durable first
+    store_.remove(e.id);                                 // then the store
+    ++removed;
+  }
+  // Compact only when the sweep actually removed something. Retention is a
+  // removal feature and the existing threshold can take months to trip on a
+  // low-volume log, which would leave expired plaintext sitting in the file;
+  // clear() already sets the precedent of a removal feature that compacts. This
+  // also reclaims an expired image's blob through compaction's existing GC.
+  // It is removal, NOT secure erase — the freed disk blocks are not overwritten.
+  if (removed > 0) compact();
+  return removed;
+}
+
 void Core::set_limits(size_t max_entries, uint64_t max_bytes) {
   store_.set_limits(max_entries, max_bytes);
 }

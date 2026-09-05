@@ -598,4 +598,114 @@ TEST_F(CoreTest, SearchReturnsPinnedMatchesFirst) {
   EXPECT_TRUE(results[0].entry.pinned);
 }
 
+
+// --- Age expiry (Core::delete_older_than) -----------------------------------
+//
+// Expiry is a REMOVAL path, not an eviction path: it rides the existing
+// TOMBSTONE control record, so replay drops the expired entries the same way it
+// drops a deleted one. ClipStore is untouched — upsert and set_limits remain the
+// only two eviction triggers.
+
+TEST_F(CoreTest, DeleteOlderThanTombstonesExpiredKeepsRecent) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add("ancient", 10);
+  core.add("stale", 40);
+  core.add("fresh", 90);
+
+  EXPECT_EQ(core.delete_older_than(50), 2u);
+  EXPECT_FALSE(contains(core, "ancient", 200));
+  EXPECT_FALSE(contains(core, "stale", 200));
+  EXPECT_TRUE(contains(core, "fresh", 200));
+}
+
+// Strictly older: an entry stamped exactly at the cutoff survives.
+TEST_F(CoreTest, DeleteOlderThanIsStrictlyOlder) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add("onTheLine", 50);
+  EXPECT_EQ(core.delete_older_than(50), 0u);
+  EXPECT_TRUE(contains(core, "onTheLine", 200));
+}
+
+// Pinned entries never expire — the same exemption clear() and eviction use. The
+// honest consequence: a retention period is NOT a guarantee that nothing older
+// survives.
+TEST_F(CoreTest, DeleteOlderThanSparesPinnedEntries) {
+  std::string pid = clipd::content_id(Kind::Text, "keepme");
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add("keepme", 10);
+  core.set_pinned(pid, true);
+  core.add("dropme", 10);
+
+  EXPECT_EQ(core.delete_older_than(50), 1u);
+  EXPECT_TRUE(contains(core, "keepme", 200));
+  EXPECT_FALSE(contains(core, "dropme", 200));
+}
+
+TEST_F(CoreTest, ExpiredEntryDoesNotComeBackOnReplay) {
+  {
+    Core core(path_, 100, kNoAutoCompact);
+    core.start();
+    core.add("expired", 10);
+    core.add("survivor", 90);
+    EXPECT_EQ(core.delete_older_than(50), 1u);
+  }
+  Core reopened(path_, 100, kNoAutoCompact);
+  reopened.start();
+  EXPECT_FALSE(contains(reopened, "expired", 200));
+  EXPECT_TRUE(contains(reopened, "survivor", 200));
+}
+
+// A sweep that removes nothing must not rewrite the log; a sweep that removes
+// something compacts, so expired records actually leave the file rather than
+// waiting on the (4 MB) compaction threshold. Removal, NOT secure erase — the
+// freed disk blocks are not overwritten.
+TEST_F(CoreTest, DeleteOlderThanCompactsOnlyWhenSomethingExpired) {
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  core.add("old", 10);
+  core.add("new", 90);
+  const uint64_t before = core.stats().log_bytes;
+
+  EXPECT_EQ(core.delete_older_than(5), 0u);
+  EXPECT_EQ(core.stats().log_bytes, before);  // no-op sweep: log untouched
+
+  EXPECT_EQ(core.delete_older_than(50), 1u);
+  EXPECT_LT(core.stats().log_bytes, before);  // real sweep: compacted down
+}
+
+// A sweep of N entries writes N control records before compacting. Prove the
+// burst is bounded and reclaimed, and that every victim really went.
+TEST_F(CoreTest, LargeSweepRemovesEveryVictimAndLeavesABoundedLog) {
+  Core core(path_, 1000, kNoAutoCompact);
+  core.start();
+  for (int i = 0; i < 500; ++i) core.add("old" + std::to_string(i), 10);
+  core.add("survivor", 90);
+  const uint64_t before = core.stats().log_bytes;
+
+  EXPECT_EQ(core.delete_older_than(50), 500u);
+  EXPECT_EQ(core.stats().entry_count, 1u);
+  EXPECT_LT(core.stats().log_bytes, before);  // burst reclaimed by the compaction
+
+  Core reopened(path_, 1000, kNoAutoCompact);
+  reopened.start();
+  EXPECT_EQ(reopened.stats().entry_count, 1u);
+  EXPECT_TRUE(contains(reopened, "survivor", 200));
+}
+
+// An expired image's blob is reclaimed by the sweep's compaction (the existing
+// GC-at-compaction rule), never eagerly.
+TEST_F(CoreTest, ExpiredImageBlobIsReclaimedByTheSweepsCompaction) {
+  std::string id = clipd::content_id(Kind::Image, "IMGOLD");
+  Core core(path_, 100, kNoAutoCompact);
+  core.start();
+  add_image(core, "IMGOLD", 2, 2, ImageFormat::Png, 10);
+  core.add("survivor", 90);
+
+  EXPECT_EQ(core.delete_older_than(50), 1u);
+  EXPECT_FALSE(core.read_blob(id).has_value());
+}
+
 }  // namespace

@@ -169,6 +169,23 @@ public final class Clipboard {
         }
     }
 
+    /// Delete every entry stamped strictly before `cutoffMs`, KEEPING pinned
+    /// entries; returns how many were removed. The core compacts when it removed
+    /// anything, so expired records leave the log here rather than waiting on the
+    /// compaction threshold — and an expired image's blob goes with them.
+    ///
+    /// This is removal, not secure erase: nothing is overwritten.
+    @discardableResult
+    public func deleteOlderThan(cutoffMs: Int64) throws -> Int {
+        try queue.sync {
+            var removed = 0
+            if clipd_delete_older_than(core, cutoffMs, &removed) != 0 {
+                throw ClipdError.mutationFailed
+            }
+            return removed
+        }
+    }
+
     /// Fetch the bytes of the blob `id` (an image Match's id), copied out of C++
     /// memory. Returns nil if the blob is missing.
     public func readBlob(id: String) -> Data? {

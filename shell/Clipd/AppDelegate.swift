@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// the hosting view down.
     private var settingsWindow: NSWindow?
     private var pollTimer: Timer?
+    private var expiryTimer: Timer?
     private var suppressAutoDismiss = false
     /// Local monitor for ↑/↓ list navigation while the query field stays focused.
     private var keyMonitor: Any?
@@ -68,6 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
 
         observeHistoryLimits()
+        observeRetention()
+        runExpirySweep(retentionDays: settings.retentionDays)  // catch up at launch
+        startExpirySweeps()
         startPolling()
         setupStatusItem()
         setupPanel()
@@ -166,6 +170,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if settings.maxEntries != maxEntries { settings.maxEntries = maxEntries }
         if settings.maxBytes != maxBytes { settings.maxBytes = maxBytes }
         return true
+    }
+
+    // MARK: - Retention
+
+    /// Age expiry is day-granularity, so exactness is pointless: a sleeping Mac
+    /// will not fire this on time and sweeping late is fine. An hour bounds how
+    /// late without any wake-scheduling machinery — there is deliberately none.
+    private static let expirySweepInterval: TimeInterval = 3600
+
+    private func startExpirySweeps() {
+        expiryTimer = Timer.scheduledTimer(withTimeInterval: Self.expirySweepInterval,
+                                           repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.runExpirySweep(retentionDays: self.settings.retentionDays)
+        }
+    }
+
+    /// Sweep as soon as the period changes, so a shortened retention takes effect
+    /// without waiting for the next tick or a restart.
+    ///
+    /// Uses the value the sink hands us rather than re-reading
+    /// `settings.retentionDays`: @Published publishes from willSet, so the
+    /// property still reads as its PRE-change value inside the sink (the bug that
+    /// bit Stages 2 and 4). dropFirst() skips the emit-on-subscribe, because the
+    /// launch sweep above has already run.
+    private func observeRetention() {
+        settings.$retentionDays
+            .dropFirst()
+            .sink { [weak self] days in self?.runExpirySweep(retentionDays: days) }
+            .store(in: &settingsSubscriptions)
+    }
+
+    /// One sweep. Best-effort: a failed sweep drops entries later rather than
+    /// taking the app down, exactly like a dropped capture.
+    private func runExpirySweep(retentionDays: Int) {
+        guard retentionDays > 0 else { return }  // Never: don't even cross the boundary
+        do {
+            let removed = try controller.sweepExpired(retentionDays: retentionDays)
+            if removed > 0 {
+                NSLog("Clipd: retention sweep removed \(removed) entries")
+            }
+        } catch {
+            NSLog("Clipd: retention sweep failed: \(error)")
+        }
+    }
+
+    /// Confirm a retention change that would START deleting entries, then persist
+    /// it and sweep at once. Returns whether it was applied, so the History tab
+    /// can snap its picker back on a cancel.
+    ///
+    /// Only a shortening (including Never → a period) is confirmed; lengthening
+    /// the period or choosing Never deletes nothing and applies silently — the
+    /// same rule the cap confirmation uses.
+    private func applyRetention(days: Int) -> Bool {
+        let proposed = ClipdRetention.sanitize(days)
+        let change = clipdRetentionChange(currentDays: settings.retentionDays,
+                                          proposedDays: proposed)
+        if change != .none {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = change.messageText
+            alert.informativeText = change.informativeText
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Delete Older Entries")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        }
+
+        // Guarded: @Published fires on any assignment, and a same-value write
+        // would re-run the observer and sweep for nothing.
+        if settings.retentionDays != proposed { settings.retentionDays = proposed }
+        return true
+    }
+
+    /// Confirm when clear-on-quit is switched ON. There is deliberately no
+    /// confirmation at quit time — the user opted in here, and a dialog on every
+    /// quit is the kind people learn to click through without reading.
+    private func applyClearOnQuit(_ enabled: Bool) -> Bool {
+        if enabled {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = ClipdClearOnQuit.messageText
+            alert.informativeText = ClipdClearOnQuit.informativeText
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Clear on Quit")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+        }
+        if settings.clearsHistoryOnQuit != enabled {
+            settings.clearsHistoryOnQuit = enabled
+        }
+        return true
+    }
+
+    /// Clear history (keeping pinned entries) on a normal quit, when the user has
+    /// opted in. Best-effort by nature: a force quit, a crash, or an abrupt logout
+    /// never delivers this notification, so the history simply survives. Clearing
+    /// also compacts, which is why a large history can make quitting take a
+    /// moment — and it is removal, not secure erase.
+    func applicationWillTerminate(_ notification: Notification) {
+        guard settings.clearsHistoryOnQuit else { return }
+        try? controller?.clear()
     }
 
     private func startPolling() {
@@ -318,9 +424,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// search panel's auto-dismiss hook and must stay panel-only.
     @objc private func showSettings() {
         if settingsWindow == nil {
-            // Sized for the tallest tab (Capture, which carries the excluded-apps
-            // list); SettingsView's own frame must match.
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 460),
+            // Sized for the tallest tab (History, once retention and
+            // clear-on-quit joined the two caps); SettingsView's own frame must
+            // match.
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 580),
                                   styleMask: [.titled, .closable],
                                   backing: .buffered,
                                   defer: false)
@@ -330,6 +437,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 onCommitHistoryLimits: { [weak self] maxEntries, maxBytes in
                     self?.applyHistoryLimits(maxEntries: maxEntries,
                                              maxBytes: maxBytes) ?? false
+                },
+                onCommitRetention: { [weak self] days in
+                    self?.applyRetention(days: days) ?? false
+                },
+                onCommitClearOnQuit: { [weak self] enabled in
+                    self?.applyClearOnQuit(enabled) ?? false
                 }))
             settingsWindow = window
         }

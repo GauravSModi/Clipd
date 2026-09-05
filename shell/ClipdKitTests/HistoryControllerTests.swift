@@ -108,3 +108,63 @@ extension HistoryControllerTests {
         XCTAssertEqual(try controller.stats().entryCount, 4)
     }
 }
+
+// MARK: - Retention sweep
+
+extension HistoryControllerTests {
+    /// The sweep runs off the controller's INJECTED clock, so this asserts
+    /// against a fixed `now` and never sleeps or reads wall-clock time.
+    func testSweepExpiredRemovesBackdatedEntriesAndSparesRecentOnes() throws {
+        let clip = try makeClipboard()
+        let monitor = PasteboardMonitor(pasteboard: FakePasteboard(), now: { 1 })
+        let day: Int64 = 86_400_000
+        let now: Int64 = 100 * day
+        let controller = HistoryController(clipboard: clip,
+                                           monitor: monitor,
+                                           compactThresholdBytes: 1 << 30,
+                                           now: { now })
+        try clip.add("ancient", at: now - 40 * day)
+        try clip.add("recent", at: now - 2 * day)
+
+        XCTAssertEqual(try controller.sweepExpired(retentionDays: 7), 1)
+
+        let texts = try controller.search("").map(\.text)
+        XCTAssertEqual(texts, ["recent"])
+    }
+
+    /// A pinned entry never expires — so "delete after N days" is not a blanket
+    /// guarantee that nothing older survives.
+    func testSweepExpiredSparesPinnedEntries() throws {
+        let clip = try makeClipboard()
+        let monitor = PasteboardMonitor(pasteboard: FakePasteboard(), now: { 1 })
+        let day: Int64 = 86_400_000
+        let now: Int64 = 100 * day
+        let controller = HistoryController(clipboard: clip,
+                                           monitor: monitor,
+                                           compactThresholdBytes: 1 << 30,
+                                           now: { now })
+        try clip.add("keepme", at: now - 40 * day)
+        try clip.add("dropme", at: now - 40 * day)
+        let id = try XCTUnwrap(controller.search("keepme").first?.id)
+        try controller.setPinned(id, true)
+
+        XCTAssertEqual(try controller.sweepExpired(retentionDays: 7), 1)
+
+        let texts = try controller.search("").map(\.text)
+        XCTAssertEqual(texts, ["keepme"])
+    }
+
+    /// Never means never: the sweep must not reach the core at all.
+    func testSweepExpiredIsANoOpWhenRetentionIsNever() throws {
+        let clip = try makeClipboard()
+        let monitor = PasteboardMonitor(pasteboard: FakePasteboard(), now: { 1 })
+        let controller = HistoryController(clipboard: clip,
+                                           monitor: monitor,
+                                           compactThresholdBytes: 1 << 30,
+                                           now: { 100 * 86_400_000 })
+        try clip.add("ancient", at: 1)
+
+        XCTAssertEqual(try controller.sweepExpired(retentionDays: 0), 0)
+        XCTAssertEqual(try controller.stats().entryCount, 1)
+    }
+}

@@ -15,17 +15,24 @@ struct SettingsView: View {
     /// snap its controls back. Owned by AppDelegate: the alert is AppKit, and the
     /// live-set stats it needs come from the controller.
     let onCommitHistoryLimits: (Int, UInt64) -> Bool
+    /// Applies a proposed retention period, confirming first if it would start
+    /// deleting entries, then sweeping at once. Returns false on a cancel.
+    let onCommitRetention: (Int) -> Bool
+    /// Applies the clear-on-quit setting, confirming when it is switched ON.
+    let onCommitClearOnQuit: (Bool) -> Bool
 
     var body: some View {
         TabView {
             GeneralSettingsView()
                 .tabItem { Label("General", systemImage: "gearshape") }
-            HistorySettingsView(onCommit: onCommitHistoryLimits)
+            HistorySettingsView(onCommit: onCommitHistoryLimits,
+                                onCommitRetention: onCommitRetention,
+                                onCommitClearOnQuit: onCommitClearOnQuit)
                 .tabItem { Label("History", systemImage: "clock") }
             CaptureSettingsView()
                 .tabItem { Label("Capture", systemImage: "clipboard") }
         }
-        .frame(width: 460, height: 440)
+        .frame(width: 460, height: 560)
         .padding(.top, 8)
     }
 }
@@ -45,13 +52,20 @@ struct SettingsView: View {
 struct HistorySettingsView: View {
     @ObservedObject private var settings = ClipdSettings.shared
     let onCommit: (Int, UInt64) -> Bool
+    let onCommitRetention: (Int) -> Bool
+    let onCommitClearOnQuit: (Bool) -> Bool
 
     @State private var entriesText = ""
     @State private var byteBudget: UInt64 = ClipdSettings.defaultMaxBytes
+    @State private var retentionDays = ClipdRetention.defaultDays
     @FocusState private var entriesFocused: Bool
 
-    init(onCommit: @escaping (Int, UInt64) -> Bool) {
+    init(onCommit: @escaping (Int, UInt64) -> Bool,
+         onCommitRetention: @escaping (Int) -> Bool,
+         onCommitClearOnQuit: @escaping (Bool) -> Bool) {
         self.onCommit = onCommit
+        self.onCommitRetention = onCommitRetention
+        self.onCommitClearOnQuit = onCommitClearOnQuit
     }
 
     var body: some View {
@@ -93,6 +107,43 @@ struct HistorySettingsView: View {
                 + "images can keep Clipd above the storage budget.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            // Retention lives here, not in Capture: how LONG an entry is kept is
+            // the same question as how MANY are kept. Unlike the two caps above,
+            // this picker does offer a "never" row — that is the default and a
+            // normal choice, not the absurd value an unbounded cap would be.
+            Picker("Delete entries older than:", selection: retentionSelection) {
+                ForEach(ClipdRetention.dayOptions, id: \.self) { days in
+                    Text(ClipdRetention.label(forDays: days)).tag(days)
+                }
+            }
+            .frame(width: 260)
+
+            Text("Clipd checks when it starts and periodically while running, so "
+                + "an entry can outlive its period by a while. Pinned entries "
+                + "never expire, so some older entries can remain.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
+            Toggle("Clear history when Clipd quits", isOn: clearOnQuitSelection)
+                .toggleStyle(.checkbox)
+
+            Text("Unpinned entries only — pinned entries are kept. Best-effort: a "
+                + "force quit or a sudden logout skips it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            // The honest floor, on the tab where it matters most: this is
+            // removal, not erasure, and the store is still local plaintext.
+            Text("Removing an entry drops it from Clipd’s history and rewrites the "
+                + "log — it does not overwrite the underlying disk space, and "
+                + "Clipd’s history is stored as local plaintext either way.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(20)
         .onAppear(perform: reseed)
@@ -113,6 +164,7 @@ struct HistorySettingsView: View {
     private func reseed() {
         entriesText = String(settings.maxEntries)
         byteBudget = ClipdHistoryLimits.nearestByteBudget(to: settings.maxBytes)
+        retentionDays = ClipdRetention.sanitize(settings.retentionDays)
     }
 
     /// The stepper drives the same text field the user can type into, and a click
@@ -148,6 +200,25 @@ struct HistorySettingsView: View {
         byteBudget = proposed  // show the click immediately; reseed corrects a cancel
         _ = onCommit(settings.maxEntries, proposed)
         reseed()
+    }
+
+    /// Same shape as the budget picker: show the click at once, then let reseed
+    /// snap it back if the confirmation was cancelled.
+    private var retentionSelection: Binding<Int> {
+        Binding(get: { retentionDays },
+                set: { proposed in
+                    guard proposed != settings.retentionDays else { return }
+                    retentionDays = proposed
+                    _ = onCommitRetention(proposed)
+                    reseed()
+                })
+    }
+
+    /// Not a direct binding to `settings`: switching this ON raises a
+    /// confirmation, and a cancel must leave nothing persisted.
+    private var clearOnQuitSelection: Binding<Bool> {
+        Binding(get: { settings.clearsHistoryOnQuit },
+                set: { _ = onCommitClearOnQuit($0) })
     }
 }
 

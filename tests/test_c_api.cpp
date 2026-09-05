@@ -488,3 +488,89 @@ TEST_F(CApiTest, SetLimitsNullHandleIsSafe) {
   // Must not crash, and must report failure like every other int-returning call.
   EXPECT_NE(clipd_set_limits(nullptr, 10, 1024), 0);
 }
+
+// --- clipd_delete_older_than ------------------------------------------------
+
+TEST_F(CApiTest, DeleteOlderThanRemovesExpiredAndReportsTheCount) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "ancient", 10), 0);
+  ASSERT_EQ(clipd_add(core, "stale", 40), 0);
+  ASSERT_EQ(clipd_add(core, "fresh", 90), 0);
+
+  size_t removed = 0;
+  ASSERT_EQ(clipd_delete_older_than(core, 50, &removed), 0);
+  EXPECT_EQ(removed, 2u);
+
+  ClipdStats s{};
+  ASSERT_EQ(clipd_stats(core, &s), 0);
+  EXPECT_EQ(s.entry_count, 1u);
+
+  ClipdResults* r = clipd_search(core, "", 10, 200);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  EXPECT_STREQ(r->matches[0].text, "fresh");
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+// A retention period is not a blanket guarantee: a pinned entry never expires.
+TEST_F(CApiTest, DeleteOlderThanSparesPinnedEntries) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "fav", 10), 0);
+  std::string id = only_match_id(core, "fav");
+  ASSERT_EQ(clipd_set_pinned(core, id.c_str(), 1), 0);
+  ASSERT_EQ(clipd_add(core, "junk", 10), 0);
+
+  size_t removed = 0;
+  ASSERT_EQ(clipd_delete_older_than(core, 50, &removed), 0);
+  EXPECT_EQ(removed, 1u);  // only the unpinned one
+
+  ClipdResults* r = clipd_search(core, "fav", 10, 200);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  EXPECT_EQ(r->matches[0].pinned, 1);
+  clipd_free_results(r);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, DeleteOlderThanAcceptsANullOutParam) {
+  ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(core, nullptr);
+  ASSERT_EQ(clipd_add(core, "old", 10), 0);
+
+  ASSERT_EQ(clipd_delete_older_than(core, 50, nullptr), 0);  // count is optional
+
+  ClipdStats s{};
+  ASSERT_EQ(clipd_stats(core, &s), 0);
+  EXPECT_EQ(s.entry_count, 0u);
+  clipd_destroy(core);
+}
+
+TEST_F(CApiTest, DeleteOlderThanNullHandleIsSafe) {
+  // Must not crash, and must report failure like every other int-returning call.
+  size_t removed = 12345;
+  EXPECT_NE(clipd_delete_older_than(nullptr, 50, &removed), 0);
+  EXPECT_EQ(removed, 12345u);  // untouched on failure
+  EXPECT_NE(clipd_delete_older_than(nullptr, 50, nullptr), 0);
+}
+
+TEST_F(CApiTest, DeleteOlderThanSurvivesReopen) {
+  {
+    ClipdCore* core = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+    ASSERT_NE(core, nullptr);
+    ASSERT_EQ(clipd_add(core, "expired", 10), 0);
+    ASSERT_EQ(clipd_add(core, "survivor", 90), 0);
+    ASSERT_EQ(clipd_delete_older_than(core, 50, nullptr), 0);
+    clipd_destroy(core);
+  }
+  ClipdCore* reopened = clipd_create(log_path().c_str(), 100, kNoAutoCompact, 0, 0);
+  ASSERT_NE(reopened, nullptr);
+  ClipdResults* r = clipd_search(reopened, "", 10, 200);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->count, 1u);
+  EXPECT_STREQ(r->matches[0].text, "survivor");
+  clipd_free_results(r);
+  clipd_destroy(reopened);
+}

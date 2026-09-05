@@ -71,6 +71,18 @@ class Core {
   // log and GC every now-unreferenced blob.
   void clear();
 
+  // Delete every live entry stamped strictly BEFORE `cutoff_ms`, keeping pinned
+  // entries — the same exemption clear() and eviction use. Returns how many were
+  // removed. Each victim gets a TOMBSTONE record appended before it leaves the
+  // store (remove()'s ordering), so a crash mid-sweep leaves a consistent log
+  // either way; when anything was removed the log is then compacted, so expired
+  // records leave the file instead of waiting on compact_threshold_bytes_.
+  //
+  // This is a removal path, not an eviction path: ClipStore is untouched and
+  // gains no timestamp-aware operation, so upsert and set_limits remain its only
+  // two eviction triggers.
+  size_t delete_older_than(int64_t cutoff_ms);
+
   // Replace the live caps and evict down to them at once. `max_entries` 0 = no
   // count cap, `max_bytes` 0 = unbounded. Eviction authority stays in ClipStore;
   // this only forwards. The log is untouched — evicted records are dropped by

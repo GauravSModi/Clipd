@@ -171,6 +171,28 @@ int clipd_clear(ClipdCore* core);
 int clipd_set_limits(ClipdCore* core, size_t max_entries, uint64_t max_bytes);
 
 /*
+ * Delete every entry stamped strictly BEFORE `cutoff_ms` (epoch ms), KEEPING
+ * pinned entries — the same exemption clipd_clear() and eviction use. A pinned
+ * entry therefore never expires, so a retention period is NOT a guarantee that
+ * nothing older survives; say so in any UI built on this.
+ *
+ * `out_removed` (may be NULL) receives how many entries were removed; it is left
+ * untouched when the call fails. Each removal is a tombstone, and when anything
+ * was removed the log is then compacted — so expired records leave the file here
+ * rather than waiting on `compact_threshold_bytes`, and an expired image's blob
+ * is reclaimed by that compaction's GC. A sweep that removes nothing does not
+ * rewrite the log.
+ *
+ * This is removal, NOT secure erase: nothing is overwritten, so the underlying
+ * disk blocks may still hold the old plaintext. Do not present it as erasure.
+ *
+ * Returns 0 on success, nonzero on failure. A NULL handle is safe (no crash) and
+ * reports failure, like every other int-returning call here.
+ */
+int clipd_delete_older_than(ClipdCore* core, int64_t cutoff_ms,
+                            size_t* out_removed);
+
+/*
  * Fetch the bytes of the blob identified by `id` (an IMAGE match's `id`). On
  * success returns a freshly allocated buffer of *out_len bytes that the caller
  * MUST release with clipd_free_blob(); on failure (unknown id, malformed id, or

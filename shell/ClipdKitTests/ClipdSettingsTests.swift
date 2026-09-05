@@ -304,4 +304,49 @@ final class ClipdSettingsTests: XCTestCase {
         XCTAssertFalse(policy.allows(.image))
         XCTAssertTrue(policy.allows(.file))
     }
+
+    // MARK: - Retention
+
+    /// Age expiry is opt-in: an upgraded install must not silently start
+    /// deleting history, and clear-on-quit must not silently start firing.
+    func testRetentionDefaultsToNeverAndClearOnQuitToOff() {
+        let settings = ClipdSettings(defaults: defaults)
+
+        XCTAssertEqual(settings.retentionDays, ClipdRetention.defaultDays)
+        XCTAssertEqual(settings.retentionDays, 0)
+        XCTAssertFalse(settings.clearsHistoryOnQuit)
+    }
+
+    func testRetentionAndClearOnQuitPersistAcrossInstances() {
+        let settings = ClipdSettings(defaults: defaults)
+        settings.retentionDays = 30
+        settings.clearsHistoryOnQuit = true
+
+        let reopened = ClipdSettings(defaults: defaults)
+
+        XCTAssertEqual(reopened.retentionDays, 30)
+        XCTAssertTrue(reopened.clearsHistoryOnQuit)
+    }
+
+    /// retentionDays deliberately does NOT go through `positiveInt` — 0 is a
+    /// real, meaningful value here (Never), not a corrupt one.
+    func testStoredNeverSurvivesRatherThanFallingBackToAPeriod() {
+        defaults.set(0, forKey: "clipd.retentionDays")
+
+        XCTAssertEqual(ClipdSettings(defaults: defaults).retentionDays, 0)
+    }
+
+    /// A junk or stale value falls back to Never — the direction that deletes
+    /// nothing. Reading it as some arbitrary period would destroy history off a
+    /// corrupt plist.
+    func testCorruptRetentionValueFallsBackToNever() {
+        defaults.set(13, forKey: "clipd.retentionDays")
+        XCTAssertEqual(ClipdSettings(defaults: defaults).retentionDays, 0)
+
+        defaults.set(-30, forKey: "clipd.retentionDays")
+        XCTAssertEqual(ClipdSettings(defaults: defaults).retentionDays, 0)
+
+        defaults.set("thirty", forKey: "clipd.retentionDays")
+        XCTAssertEqual(ClipdSettings(defaults: defaults).retentionDays, 0)
+    }
 }

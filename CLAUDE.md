@@ -224,8 +224,15 @@ swift test                       # also: --sanitize=address | --sanitize=thread
 # runs cmake). Clipd.xcodeproj is generated/gitignored; project.yml is source.
 xcodegen generate
 xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
-  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+  -destination 'platform=macOS' build
 ```
+
+**Do NOT add `CODE_SIGNING_ALLOWED=NO`.** It produces an ad-hoc/linker-signed
+binary whose CDHash changes on every rebuild, which silently invalidates the
+Accessibility (TCC) grant that paste-back depends on — while the "Clipd" row
+still *looks* checked in System Settings. Symptom: the panel dismisses and
+nothing pastes (the entry only reaches the clipboard). `project.yml` pins a
+stable Development identity so the grant survives rebuilds.
 
 ## Invariants (must survive every change)
 

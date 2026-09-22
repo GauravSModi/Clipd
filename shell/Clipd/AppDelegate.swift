@@ -520,7 +520,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         installKeyMonitor()
-        DispatchQueue.main.async { [weak self] in self?.suppressAutoDismiss = false }
+        DispatchQueue.main.async { [weak self] in
+            self?.suppressAutoDismiss = false
+            // Now that the panel is actually key, ask the search field to take
+            // focus. Doing it here (not just in the view's `.onAppear`) re-focuses
+            // on every open and after the window is key, so typing filters and the
+            // field behaves normally each time the panel is summoned.
+            self?.model.focusNonce += 1
+        }
     }
 
     private func hidePanel() {
@@ -542,6 +549,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             switch event.keyCode {
             case 126: self.model.moveSelection(by: -1); return nil   // up
             case 125: self.model.moveSelection(by: 1);  return nil   // down
+            // Return / keypad-Enter: activate the highlighted row here rather
+            // than via SwiftUI's `.onSubmit`, which only fires when the search
+            // field is first responder. Routing it through this monitor (like
+            // ↑/↓) makes Enter paste even when focus didn't take. Consuming the
+            // event (return nil) also stops a duplicate `.onSubmit` firing when
+            // the field *does* have focus. ⌘↵ is excluded by the guard above, so
+            // it still reaches the invisible "copy" button.
+            case 36, 76: self.model.chooseSelected(); return nil     // return / enter
             default:  return event
             }
         }
@@ -576,8 +591,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             SystemClipboardWriter.writeFile(match.text)  // for File, text == path
         }
         switch action {
-        case .copy:  hidePanel()
-        case .paste: pasteBack()
+        case .copy:
+            hidePanel()
+            // The user asked to PASTE but we could only copy — that can only be
+            // the missing Accessibility permission, and staying silent about it
+            // is indistinguishable from "the app is broken" (the panel just
+            // dismisses and nothing appears). Say so once per launch.
+            if requested == .paste { warnAccessibilityMissing() }
+        case .paste:
+            pasteBack()
+        }
+    }
+
+    /// Told the user this launch already? Paste-back is a frequent action, so a
+    /// dialog on every press would be worse than the silence it replaces.
+    private var didWarnAccessibility = false
+
+    /// Explain why a requested paste only copied, and offer the fix. Deliberately
+    /// NOT gated on `settings.didRequestAccessibility`: that flag gates the
+    /// one-time onboarding prompt at first run, whereas this is feedback for an
+    /// action the user just took and watched fail. The two must stay independent,
+    /// or a user who dismissed the first-run prompt gets no explanation ever.
+    ///
+    /// Note the entry IS on the pasteboard, so ⌘V always works — the alert says
+    /// that rather than presenting this as a total failure.
+    private func warnAccessibilityMissing() {
+        guard !didWarnAccessibility else { return }
+        didWarnAccessibility = true
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Copied — but Clipd can’t paste for you"
+        alert.informativeText = """
+            Pasting directly into the app you were using needs the Accessibility \
+            permission. The entry is on your clipboard, so you can press ⌘V yourself.
+
+            If Clipd already appears checked in Accessibility, remove it with “−” \
+            and add it again — a rebuilt app is treated as a different app.
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Not Now")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // Re-ask the system first: this is what re-adds Clipd to the list when the
+        // grant was invalidated, so the user has a row to toggle when they arrive.
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
     }
 

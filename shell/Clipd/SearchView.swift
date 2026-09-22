@@ -19,7 +19,8 @@ struct SearchView: View {
                 .font(.title3)
                 .padding(12)
                 .focused($queryFocused)
-                .onSubmit { model.chooseSelected() }
+                // Enter is handled by AppDelegate's key monitor (focus-independent),
+                // so there's no `.onSubmit` here — see installKeyMonitor().
                 .onChange(of: model.query) { _ in model.refresh() }
 
             Divider()
@@ -43,6 +44,10 @@ struct SearchView: View {
         .frame(width: 540, height: 420)
         .background(recentShortcutButtons)
         .onAppear { queryFocused = true }
+        // Re-grab focus every time the panel is shown: the app layer bumps
+        // focusNonce after the panel becomes key. `.onAppear` alone fires only on
+        // the first open (the panel is reused, never released), and too early.
+        .onChange(of: model.focusNonce) { _ in queryFocused = true }
     }
 
     private func resultsList(now: Int64) -> some View {

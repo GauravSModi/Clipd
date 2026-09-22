@@ -35,6 +35,22 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: YES
         SWIFT_VERSION: "5.0"
+        # Sign with a stable Development identity, NOT ad-hoc. macOS records the
+        # Accessibility (TCC) grant against the binary's identity; an ad-hoc /
+        # linker-signed build (what CODE_SIGNING_ALLOWED=NO produces) gets a new
+        # content-derived CDHash on EVERY rebuild, so the grant silently stops
+        # applying while the "Clipd" row still looks checked in System Settings —
+        # and paste-back then degrades to copy-only. A real certificate makes TCC
+        # key on the designated requirement (bundle id + team), which is stable
+        # across rebuilds, so the grant survives.
+        # Manual, not Automatic: automatic signing wants a provisioning profile
+        # from the developer portal, which this local menu-bar tool has no need
+        # for (no sandbox, no profile-gated entitlements). Naming the identity
+        # directly keeps the build offline and deterministic.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: "469PH97762"
+        PROVISIONING_PROFILE_SPECIFIER: ""
     preBuildScripts:
       - name: Build clipd C++ core (CMake)
         basedOnDependencyAnalysis: false

@@ -11,6 +11,13 @@ final class SearchModel: ObservableObject {
     /// Highlighted row; arrow keys move it, Enter activates it. Defaults to 0 so
     /// Enter on a fresh panel still takes the top result.
     @Published var selectedIndex = 0
+    /// Bumped by the app layer each time the panel is shown. The view watches it
+    /// and re-grabs keyboard focus for the search field. We can't rely on
+    /// SwiftUI's `.onAppear` alone: the panel is reused (never released), so
+    /// `.onAppear` fires only on the very first open — and even then the panel
+    /// isn't key yet, so the focus request is dropped. A changing value the view
+    /// can observe lets us re-focus on every open, after the panel is key.
+    @Published var focusNonce = 0
 
     let controller: HistoryController
     /// Image thumbnails keyed by blob id. ImageIO downsamples on first access; the

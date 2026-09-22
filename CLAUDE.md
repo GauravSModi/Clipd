@@ -225,6 +225,17 @@ swift test                       # also: --sanitize=address | --sanitize=thread
 xcodegen generate
 xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
   -destination 'platform=macOS' build
+
+# App icon: drawn by a script, not a design file. `preview` writes every style
+# to build/icon-previews/compare.png; `install` rewrites the committed
+# shell/Clipd/Assets.xcassets (installed style: blue). After installing: rebuild,
+# touch the built .app, relaunch. macOS caches app icons keyed on the .app
+# folder's date, which in-place rebuilds never change — skip the touch and the
+# running app (its NSAlerts) keeps the old icon even though Finder may not.
+swift scripts/make_app_icon.swift preview
+swift scripts/make_app_icon.swift install blue
+touch "$(xcodebuild -project Clipd.xcodeproj -scheme Clipd -configuration Debug \
+  -showBuildSettings 2>/dev/null | awk '/ CODESIGNING_FOLDER_PATH =/{print $3}')"
 ```
 
 **Do NOT add `CODE_SIGNING_ALLOWED=NO`.** It produces an ad-hoc/linker-signed

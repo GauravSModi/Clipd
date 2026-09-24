@@ -152,7 +152,22 @@ The alert copy promises neither permanence nor recoverability — a
 `@Published` sinks each consume their **own** emitted value and read the *other*
 cap off `settings` (the willSet trap again), and both use `.dropFirst()` so
 launch doesn't re-apply the values `clipd_create` was just handed. Run-the-app
-verification of the History tab is still pending.
+verified (2026-09-23, on a backed-up copy of real history): a reduction confirms
+with the right upper bound and evicts exactly (lowering to 200 and then to 100
+showed "Up to 100"), Cancel applies nothing, and raising applies silently. The
+storage budget, pushed over with three ~27 MB test images, confirmed at 79 MB →
+64 MB and evicted least-recent-unpinned first while keeping the pin, so the
+`$maxBytes` sink applies the new value. **Known bugs in the entries field (found
+in that run, not yet fixed):** (1) clicking elsewhere in the window doesn't
+commit — on macOS a click on non-focusable content doesn't move first responder,
+so the focus-loss commit never fires and the field can show a value that isn't
+in force; (2) ⌘A/⌘C/⌘V/⌘X do nothing, because the app never builds a main menu
+and those shortcuts are Edit-menu key equivalents (the search field is probably
+affected too — unverified); (3) the field accepts letters (digits are filtered
+only at commit); (4) an out-of-range number clamps to 100,000 and saves
+silently, since a raise never confirms. (2) plus (4) is the likely way the run's
+cap became 100,000 unasked: clicking into "10000" puts the caret at the end, so
+typing "200" makes "10000200".
 
 **Stage 5 (retention: age expiry + clear-on-quit) is shipped** — the second
 stage to open C++, riding the **existing** TOMBSTONE control record rather than
@@ -182,8 +197,14 @@ quit or abrupt logout never runs it, and it can make quitting visibly slow
 because `clear()` compacts); it confirms only on **enabling**, never at quit
 time. Both alerts' wording is pinned by `RetentionTests` to promise **neither
 permanence nor recoverability** and to name the pinned exemption. Run-the-app
-verification of the History tab's retention picker and clear-on-quit is still
-pending (Stage 4's History-tab verification is also still outstanding).
+verified (2026-09-23, same run): shortening Never → 30 days confirmed, Cancel
+snapped the picker back, and confirming removed exactly the unpinned entries
+past the cutoff (1,697 of 2,049, reconciled by entry id) and compacted (log
+3.0 MB → 480 KB, orphan blobs GC'd); lengthening applied silently. Clear-on-quit
+confirms only on enabling (Cancel leaves it off), and a normal quit left only
+the pinned entry, with every blob reclaimed. The stored period and checkbox
+survived that restart in `UserDefaults`; the tab's display of them after the
+restart, and switching both back off, were not exercised.
 
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,

@@ -3,39 +3,8 @@ import ServiceManagement
 import KeyboardShortcuts
 import ClipdKit
 
-/// The Settings window's content. Tabbed from the start so later settings land as
-/// new tabs rather than a restructure; only General exists today.
-///
-/// The app is AppKit-bootstrapped (main.swift builds NSApplication directly), so
-/// there is no SwiftUI `Settings` scene — AppDelegate hosts this in an NSWindow via
-/// NSHostingView, the same way setupPanel() hosts SearchView.
-struct SettingsView: View {
-    /// Applies a proposed pair of history caps, confirming first if the change
-    /// would evict. Returns false when the user cancels, so the History tab can
-    /// snap its controls back. Owned by AppDelegate: the alert is AppKit, and the
-    /// live-set stats it needs come from the controller.
-    let onCommitHistoryLimits: (Int, UInt64) -> Bool
-    /// Applies a proposed retention period, confirming first if it would start
-    /// deleting entries, then sweeping at once. Returns false on a cancel.
-    let onCommitRetention: (Int) -> Bool
-    /// Applies the clear-on-quit setting, confirming when it is switched ON.
-    let onCommitClearOnQuit: (Bool) -> Bool
-
-    var body: some View {
-        TabView {
-            GeneralSettingsView()
-                .tabItem { Label("General", systemImage: "gearshape") }
-            HistorySettingsView(onCommit: onCommitHistoryLimits,
-                                onCommitRetention: onCommitRetention,
-                                onCommitClearOnQuit: onCommitClearOnQuit)
-                .tabItem { Label("History", systemImage: "clock") }
-            CaptureSettingsView()
-                .tabItem { Label("Capture", systemImage: "clipboard") }
-        }
-        .frame(width: 460, height: 560)
-        .padding(.top, 8)
-    }
-}
+// The Settings window's panes, one per toolbar tab. SettingsWindow.swift builds
+// the window and the tabs around them.
 
 /// History: how much is kept. Separate from Capture on purpose — Capture decides
 /// what gets recorded, History decides how much of it survives.
@@ -53,8 +22,15 @@ struct SettingsView: View {
 /// both commit paths re-seed from it whether the user accepted or cancelled.
 struct HistorySettingsView: View {
     @ObservedObject private var settings = ClipdSettings.shared
+    /// Applies a proposed pair of history caps, confirming first if the change
+    /// would evict. Returns false when the user cancels, so this tab can snap its
+    /// controls back. Owned by AppDelegate: the alert is AppKit, and the live-set
+    /// stats it needs come from the controller.
     let onCommit: (Int, UInt64) -> Bool
+    /// Applies a proposed retention period, confirming first if it would start
+    /// deleting entries, then sweeping at once. Returns false on a cancel.
     let onCommitRetention: (Int) -> Bool
+    /// Applies the clear-on-quit setting, confirming when it is switched ON.
     let onCommitClearOnQuit: (Bool) -> Bool
 
     @State private var entriesText = ""

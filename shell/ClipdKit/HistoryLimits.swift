@@ -1,6 +1,7 @@
 // HistoryLimits — the pure pieces behind the History settings tab: the bounds the
-// UI clamps to, and the decision about whether a proposed pair of caps would
-// actually evict anything (which is what gates the confirmation alert).
+// UI enforces, the verdict on what the entries field holds, and the decision
+// about whether a proposed pair of caps would actually evict anything (which is
+// what gates the confirmation alert).
 //
 // Pure and UI-free like the other kit helpers. It produces display strings the
 // same way RelativeTime does, so the alert's wording can be pinned by a test —
@@ -32,10 +33,6 @@ public enum ClipdHistoryLimits {
         64 * mb, 128 * mb, 256 * mb, 512 * mb, gb, 2 * gb, 4 * gb,
     ]
 
-    public static func clampEntries(_ count: Int) -> Int {
-        min(max(count, minEntries), maxEntries)
-    }
-
     /// The option to show for a stored budget that isn't itself an option (an
     /// older default, or a hand-edited plist). Rounds UP to the next option so a
     /// merely-displayed value never implies a tighter budget than is in force;
@@ -57,6 +54,59 @@ public enum ClipdHistoryLimits {
 
     private static func rounded(_ bytes: UInt64, unit: UInt64) -> UInt64 {
         (bytes + unit / 2) / unit
+    }
+
+    /// The "Keep at most" field's keystroke filter, run on every edit (typed or
+    /// pasted) so the box only ever holds digits. ASCII only on purpose:
+    /// `Character.isWholeNumber` also accepts other scripts' digits ("٣", "１"),
+    /// which `Int()` can't parse.
+    public static func digitsOnly(_ text: String) -> String {
+        text.filter { $0.isASCII && $0.isNumber }
+    }
+}
+
+/// What the "Keep at most" field holds, judged against the count in force — the
+/// one decision behind both the field's commit and its caption.
+///
+/// An out-of-range number is `.invalid` and is refused, never clamped: a clamp
+/// saves a number nobody typed, which is how the 2026-09-23 run's cap silently
+/// became 100,000.
+public enum ClipdEntriesEdit: Equatable {
+    /// Nothing to apply: the box is empty (leaving it restores the count in
+    /// force) or already holds that count.
+    case unchanged
+    /// An in-range count that differs from the one in force.
+    case valid(Int)
+    /// Out of range, or too many digits to be a count at all.
+    case invalid
+
+    /// `text` is normally digits already (see `digitsOnly`); anything that still
+    /// fails to parse comes out `.invalid`.
+    public init(text: String, current: Int) {
+        guard !text.isEmpty else { self = .unchanged; return }
+        guard let count = Int(text) else { self = .invalid; return }  // overflows Int
+        if count == current {
+            // Before the range check: a hand-edited count outside the UI's range
+            // can sit in the box without a beep every time the user clicks away.
+            self = .unchanged
+        } else if (ClipdHistoryLimits.minEntries...ClipdHistoryLimits.maxEntries).contains(count) {
+            self = .valid(count)
+        } else {
+            self = .invalid
+        }
+    }
+
+    /// The line under the field. The box can hold a count that isn't in force
+    /// yet (mid-edit, or the window was closed before a commit), so the caption
+    /// is what keeps it from ever doing that silently.
+    public var caption: String {
+        let low = ClipdHistoryLimits.minEntries.formatted()
+        let high = ClipdHistoryLimits.maxEntries.formatted()
+        switch self {
+        case .unchanged: return "\(low)–\(high) entries."
+        case .valid: return "Press Return to apply."
+        case .invalid: return "Enter a number from \(low) to \(high)."
+        }
     }
 }
 

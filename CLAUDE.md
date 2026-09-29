@@ -21,7 +21,13 @@ core/C-API/header/log change): direct paste-back (Enter pastes into the prior
 app, ⌘↵ copies; needs the Accessibility permission), keyboard selection (↑/↓ +
 Enter + ⌘1–9), content-type affordances (URL/email/hex color), and
 launch-at-login. Pure logic lives in `ClipdKit` helpers (`ContentType`,
-`SelectionIndex`, `PasteAction`) and is unit-tested.
+`SelectionIndex`, `PasteAction`) and is unit-tested. Since 2026-09-25 the panel
+opens with the **newest copy** highlighted (`clipdDefaultSelection`, by
+timestamp), because pinned-first ordering can put it below older starred rows. A
+starred row wins only when it is itself the newest — re-copying an entry, or
+pasting it from Clipd (the monitor re-captures Clipd's own pasteboard write),
+bumps its timestamp. A new query starts on its top match; pin/delete/clear keep
+the highlight where it was. ⌘1–9 still count from the top row, by choice.
 
 **Post-v1 image / file capture** — shipped after the shell batch
 (`git show a23ef25 a2160ec`). First post-v1 batch that crosses every layer:
@@ -157,17 +163,26 @@ with the right upper bound and evicts exactly (lowering to 200 and then to 100
 showed "Up to 100"), Cancel applies nothing, and raising applies silently. The
 storage budget, pushed over with three ~27 MB test images, confirmed at 79 MB →
 64 MB and evicted least-recent-unpinned first while keeping the pin, so the
-`$maxBytes` sink applies the new value. **Known bugs in the entries field (found
-in that run, not yet fixed):** (1) clicking elsewhere in the window doesn't
-commit — on macOS a click on non-focusable content doesn't move first responder,
-so the focus-loss commit never fires and the field can show a value that isn't
-in force; (2) ⌘A/⌘C/⌘V/⌘X do nothing, because the app never builds a main menu
-and those shortcuts are Edit-menu key equivalents (the search field is probably
-affected too — unverified); (3) the field accepts letters (digits are filtered
-only at commit); (4) an out-of-range number clamps to 100,000 and saves
-silently, since a raise never confirms. (2) plus (4) is the likely way the run's
-cap became 100,000 unasked: clicking into "10000" puts the caret at the end, so
-typing "200" makes "10000200".
+`$maxBytes` sink applies the new value. That run also found four bugs in the
+entries field, **fixed and run-the-app verified 2026-09-25**: (1) a click on blank
+space never committed — on macOS a click on non-focusable content doesn't move
+first responder — so the History tab now fills itself with a tap shape that drops
+the field's focus and fires the focus-loss commit; (2) ⌘A/⌘C/⌘V/⌘X did nothing,
+here and in the panel's search box, because they are Edit-menu key equivalents
+and the app had no main menu — `ClipdMainMenu` (installed in `main.swift`) is a
+never-shown Edit menu that exists only to route them, so the hotkey recorder now
+refuses those shortcuts as the global hotkey; (3) letters were accepted —
+`ClipdHistoryLimits.digitsOnly` now filters every edit, typed or pasted; (4) an
+out-of-range count was clamped to 100,000 and saved silently (the caret landed
+after "10000", so typing "200" made "10000200") — `ClipdEntriesEdit` now refuses
+it with a beep and a snap-back, **never a clamp**, and its caption says whenever
+the box holds a count that isn't in force. **Watch:** SwiftUI runs `.onChange`
+inside a Core Animation transaction commit, where AppKit *suppresses*
+`NSAlert.runModal()` (logging "Suppressing invocation of -[NSAlert runModal]")
+and the suppressed alert reads as Cancel. The focus-loss commit therefore hops to
+the next run-loop turn (`DispatchQueue.main.async`) before it can confirm; any
+confirmation raised from an `onChange` needs the same hop, while Binding setters
+and `.onSubmit` run outside the commit and don't.
 
 **Stage 5 (retention: age expiry + clear-on-quit) is shipped** — the second
 stage to open C++, riding the **existing** TOMBSTONE control record rather than

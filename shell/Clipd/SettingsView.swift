@@ -49,7 +49,7 @@ struct HistorySettingsView: View {
     var body: some View {
         Form {
             HStack(spacing: 6) {
-                Text("Keep at most")
+                Text("Keep at most:")
                 TextField("", text: $entriesText)
                     .frame(width: 72)
                     .multilineTextAlignment(.trailing)
@@ -193,27 +193,35 @@ struct HistorySettingsView: View {
 /// General: the global hotkey and the login item. The shortcut owns its own
 /// persistence inside KeyboardShortcuts; the login item is owned by
 /// ClipdLoginItem, observed here so a toggle made in the status menu redraws this
-/// checkbox (and vice versa).
+/// switch (and vice versa).
 struct GeneralSettingsView: View {
     @ObservedObject private var loginItem = ClipdLoginItem.shared
 
     var body: some View {
         Form {
-            KeyboardShortcuts.Recorder("Search Clipd:", name: .toggleClipd)
-
-            HStack {
-                Spacer()
-                Button("Reset to Default") { KeyboardShortcuts.reset(.toggleClipd) }
+            Section {
+                // The label-less recorder, so LabeledContent can put the label
+                // on the left and the recorder with Reset on the right.
+                LabeledContent("Search Clipd shortcut") {
+                    HStack {
+                        KeyboardShortcuts.Recorder(for: .toggleClipd)
+                        Button("Reset") { KeyboardShortcuts.reset(.toggleClipd) }
+                    }
+                }
             }
 
-            Divider().padding(.vertical, 4)
-
-            Toggle("Launch Clipd at login", isOn: Binding(
-                get: { loginItem.isEnabled },
-                set: { loginItem.setEnabled($0) }))
-                .toggleStyle(.checkbox)
+            Section {
+                Toggle("Launch Clipd at login", isOn: Binding(
+                    get: { loginItem.isEnabled },
+                    set: { loginItem.setEnabled($0) }))
+            }
         }
-        .padding(20)
+        .formStyle(.grouped)
+        .toggleStyle(WholeRowToggleStyle())
+        // Same sizing as CaptureSettingsView, which explains it.
+        .scrollDisabled(true)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 500)
         // Catch changes made outside the app (System Settings ▸ Login Items).
         .onAppear { loginItem.refresh() }
         .onReceive(NotificationCenter.default.publisher(
@@ -231,35 +239,62 @@ struct CaptureSettingsView: View {
 
     var body: some View {
         Form {
-            Toggle("Pause clipboard capture", isOn: $settings.captureIsPaused)
-                .toggleStyle(.checkbox)
+            Section {
+                Toggle("Pause capture", isOn: $settings.captureIsPaused)
+            }
 
-            Divider().padding(.vertical, 4)
-
-            Text("Capture these types:")
-            Toggle("Text", isOn: $settings.capturesText)
-                .toggleStyle(.checkbox)
-            Toggle("Images", isOn: $settings.capturesImages)
-                .toggleStyle(.checkbox)
-            Toggle("Files", isOn: $settings.capturesFiles)
-                .toggleStyle(.checkbox)
-
-            Divider().padding(.vertical, 4)
+            Section("Capture types") {
+                Toggle("Text", isOn: $settings.capturesText)
+                Toggle("Images", isOn: $settings.capturesImages)
+                Toggle("Files", isOn: $settings.capturesFiles)
+            }
 
             // The framing here has to stay honest: this is a frontmost-app check
             // with a poll-interval race that only covers the listed apps. It is a
-            // best-effort heuristic, not security (see CLAUDE.md).
-            Text("Don’t capture from these apps:")
-            ExcludedAppsView(settings: settings)
-            Text(ClipdSettingsCopy.excludedAppsFooter)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            // best-effort heuristic, not security (see CLAUDE.md). This footer is
+            // the only explanation in the Settings window, on purpose.
+            Section {
+                ExcludedAppsView(settings: settings)
+            } header: {
+                Text("Don’t capture from these apps")
+            } footer: {
+                Text(ClipdSettingsCopy.excludedAppsFooter)
+            }
         }
-        .padding(20)
+        .formStyle(.grouped)
+        .toggleStyle(WholeRowToggleStyle())
+        // The window is sized to the pane, so the Form never needs to scroll;
+        // fixedSize reports the Form's full content height for that measurement.
+        .scrollDisabled(true)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 500)
     }
 }
 
-/// The single owner of login-item state, shared by the Settings checkbox and the
+/// Lets a click anywhere on a switch's row flip it — the label, the empty space
+/// between, or the card's margin around them — not only a click on the switch
+/// itself. It adds just that tap: `Toggle(configuration)` draws the toggle in the
+/// style it would have had anyway, a grouped Form's switch. A click on the switch
+/// itself is taken by the switch, an AppKit control, so it doesn't also reach the
+/// tap and flip it twice.
+private struct WholeRowToggleStyle: ToggleStyle {
+    /// How far a grouped Form insets a row's content from its card's edges and
+    /// from the divider below it — measured, not documented. Growing the tap area
+    /// by exactly this much fills the card without overlapping the next row's.
+    private static let rowInset: CGFloat = 10
+
+    func makeBody(configuration: Configuration) -> some View {
+        Toggle(configuration)
+            // Grow the tappable area out to the card's edges, then take the same
+            // amount back so the row's layout doesn't move.
+            .padding(Self.rowInset)
+            .contentShape(Rectangle())
+            .onTapGesture { configuration.isOn.toggle() }
+            .padding(-Self.rowInset)
+    }
+}
+
+/// The single owner of login-item state, shared by the Settings switch and the
 /// status-menu item so the two can't disagree: both read `isEnabled` and both
 /// mutate through `setEnabled`, and the @Published value redraws SwiftUI.
 ///

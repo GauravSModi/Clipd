@@ -7,31 +7,28 @@ import ClipdKit
 /// Clipd target rather than ClipdKit because it needs NSWorkspace/NSOpenPanel —
 /// the same reason ClipdLoginItem sits in SettingsView.swift.
 ///
+/// It supplies the rows of a grouped Form section: `body` lists its views with no
+/// wrapper, so the enclosing Section draws each one as its own row.
+/// CaptureSettingsView owns the section's header and footer.
+///
 /// The view holds no list logic: add/remove/de-dupe are ClipdSettings' job, so the
 /// stored list has exactly one owner.
 struct ExcludedAppsView: View {
     @ObservedObject var settings: ClipdSettings
-    @State private var selection: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            List(settings.excludedSourceApps, id: \.self, selection: $selection) { bundleID in
-                ExcludedAppRow(bundleID: bundleID)
-            }
-            .listStyle(.bordered(alternatesRowBackgrounds: true))
-            .frame(height: 104)
-
-            HStack(spacing: 10) {
-                Button(action: addApp) { Image(systemName: "plus") }
-                    .help("Choose an app to exclude")
-                // Removal is trivially reversible (re-add via the picker), so it
-                // needs no confirmation — unlike deleting a pinned entry.
-                Button(action: removeSelected) { Image(systemName: "minus") }
-                    .disabled(selection == nil)
-                    .help("Stop excluding the selected app")
-                Spacer()
-            }
-            .buttonStyle(.bordered)
+        if settings.excludedSourceApps.isEmpty {
+            Text("No apps excluded")
+                .foregroundStyle(.secondary)
+        }
+        ForEach(settings.excludedSourceApps, id: \.self) { bundleID in
+            // Removal is trivially reversible (re-add via the picker), so it
+            // needs no confirmation — unlike deleting a pinned entry.
+            ExcludedAppRow(bundleID: bundleID) { settings.removeExcludedApp(bundleID) }
+        }
+        HStack {
+            Spacer()
+            Button("Add App…", action: addApp)
         }
     }
 
@@ -53,31 +50,36 @@ struct ExcludedAppsView: View {
             settings.addExcludedApp(bundleID)
         }
     }
-
-    private func removeSelected() {
-        guard let selection else { return }
-        settings.removeExcludedApp(selection)
-        self.selection = nil
-    }
 }
 
-/// One row: the app's display name over its bundle id. An app that isn't installed
-/// (or was since removed) shows only its bundle id, so the rule stays readable and
-/// the user can still keep or delete it.
+/// One row: the app's icon, its display name over its bundle id, and a remove
+/// button. An app that isn't installed (or was since removed) shows only its
+/// bundle id beside the generic app icon, so the rule stays readable and the user
+/// can still keep or delete it.
 private struct ExcludedAppRow: View {
     let bundleID: String
+    let onRemove: () -> Void
 
     var body: some View {
         let name = clipdAppDisplayName(bundleID: bundleID)
-        VStack(alignment: .leading, spacing: 1) {
-            Text(name ?? bundleID)
-            if name != nil {
-                Text(bundleID)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Image(nsImage: clipdAppIcon(bundleID: bundleID))
+                .resizable()
+                .frame(width: 24, height: 24)
+                .accessibilityHidden(true)  // the name beside it says the same thing
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name ?? bundleID)
+                if name != nil {
+                    Text(bundleID)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            Spacer()
+            Button(action: onRemove) { Image(systemName: "minus.circle") }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Remove \(name ?? bundleID)")
         }
-        .padding(.vertical, 1)
     }
 }
 
@@ -86,4 +88,14 @@ func clipdAppDisplayName(bundleID: String) -> String? {
     guard let url = NSWorkspace.shared
         .urlForApplication(withBundleIdentifier: bundleID) else { return nil }
     return FileManager.default.displayName(atPath: url.path)
+}
+
+/// The app's Finder icon, or the generic app icon when it can't be resolved — so
+/// a rule for an uninstalled app still gets a row that lines up with the rest.
+func clipdAppIcon(bundleID: String) -> NSImage {
+    guard let url = NSWorkspace.shared
+        .urlForApplication(withBundleIdentifier: bundleID) else {
+        return NSWorkspace.shared.icon(for: .application)
+    }
+    return NSWorkspace.shared.icon(forFile: url.path)
 }

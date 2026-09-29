@@ -21,7 +21,13 @@ core/C-API/header/log change): direct paste-back (Enter pastes into the prior
 app, ⌘↵ copies; needs the Accessibility permission), keyboard selection (↑/↓ +
 Enter + ⌘1–9), content-type affordances (URL/email/hex color), and
 launch-at-login. Pure logic lives in `ClipdKit` helpers (`ContentType`,
-`SelectionIndex`, `PasteAction`) and is unit-tested.
+`SelectionIndex`, `PasteAction`) and is unit-tested. Since 2026-09-25 the panel
+opens with the **newest copy** highlighted (`clipdDefaultSelection`, by
+timestamp), because pinned-first ordering can put it below older starred rows. A
+starred row wins only when it is itself the newest — re-copying an entry, or
+pasting it from Clipd (the monitor re-captures Clipd's own pasteboard write),
+bumps its timestamp. A new query starts on its top match; pin/delete/clear keep
+the highlight where it was. ⌘1–9 still count from the top row, by choice.
 
 **Post-v1 image / file capture** — shipped after the shell batch
 (`git show a23ef25 a2160ec`). First post-v1 batch that crosses every layer:
@@ -152,7 +158,31 @@ The alert copy promises neither permanence nor recoverability — a
 `@Published` sinks each consume their **own** emitted value and read the *other*
 cap off `settings` (the willSet trap again), and both use `.dropFirst()` so
 launch doesn't re-apply the values `clipd_create` was just handed. Run-the-app
-verification of the History tab is still pending.
+verified (2026-09-23, on a backed-up copy of real history): a reduction confirms
+with the right upper bound and evicts exactly (lowering to 200 and then to 100
+showed "Up to 100"), Cancel applies nothing, and raising applies silently. The
+storage budget, pushed over with three ~27 MB test images, confirmed at 79 MB →
+64 MB and evicted least-recent-unpinned first while keeping the pin, so the
+`$maxBytes` sink applies the new value. That run also found four bugs in the
+entries field, **fixed and run-the-app verified 2026-09-25**: (1) a click on blank
+space never committed — on macOS a click on non-focusable content doesn't move
+first responder — so the History tab now fills itself with a tap shape that drops
+the field's focus and fires the focus-loss commit; (2) ⌘A/⌘C/⌘V/⌘X did nothing,
+here and in the panel's search box, because they are Edit-menu key equivalents
+and the app had no main menu — `ClipdMainMenu` (installed in `main.swift`) is a
+never-shown Edit menu that exists only to route them, so the hotkey recorder now
+refuses those shortcuts as the global hotkey; (3) letters were accepted —
+`ClipdHistoryLimits.digitsOnly` now filters every edit, typed or pasted; (4) an
+out-of-range count was clamped to 100,000 and saved silently (the caret landed
+after "10000", so typing "200" made "10000200") — `ClipdEntriesEdit` now refuses
+it with a beep and a snap-back, **never a clamp**, and its caption says whenever
+the box holds a count that isn't in force. **Watch:** SwiftUI runs `.onChange`
+inside a Core Animation transaction commit, where AppKit *suppresses*
+`NSAlert.runModal()` (logging "Suppressing invocation of -[NSAlert runModal]")
+and the suppressed alert reads as Cancel. The focus-loss commit therefore hops to
+the next run-loop turn (`DispatchQueue.main.async`) before it can confirm; any
+confirmation raised from an `onChange` needs the same hop, while Binding setters
+and `.onSubmit` run outside the commit and don't.
 
 **Stage 5 (retention: age expiry + clear-on-quit) is shipped** — the second
 stage to open C++, riding the **existing** TOMBSTONE control record rather than
@@ -182,8 +212,14 @@ quit or abrupt logout never runs it, and it can make quitting visibly slow
 because `clear()` compacts); it confirms only on **enabling**, never at quit
 time. Both alerts' wording is pinned by `RetentionTests` to promise **neither
 permanence nor recoverability** and to name the pinned exemption. Run-the-app
-verification of the History tab's retention picker and clear-on-quit is still
-pending (Stage 4's History-tab verification is also still outstanding).
+verified (2026-09-23, same run): shortening Never → 30 days confirmed, Cancel
+snapped the picker back, and confirming removed exactly the unpinned entries
+past the cutoff (1,697 of 2,049, reconciled by entry id) and compacted (log
+3.0 MB → 480 KB, orphan blobs GC'd); lengthening applied silently. Clear-on-quit
+confirms only on enabling (Cancel leaves it off), and a normal quit left only
+the pinned entry, with every blob reclaimed. The stored period and checkbox
+survived that restart in `UserDefaults`; the tab's display of them after the
+restart, and switching both back off, were not exercised.
 
 `prd_clipd.md` is the **authoritative spec**. Consult it before planning any
 phase or making an architectural decision. If a request conflicts with it,

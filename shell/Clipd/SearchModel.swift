@@ -8,8 +8,10 @@ import ClipdKit
 final class SearchModel: ObservableObject {
     @Published var query = ""
     @Published var results: [Match] = []
-    /// Highlighted row; arrow keys move it, Enter activates it. Defaults to 0 so
-    /// Enter on a fresh panel still takes the top result.
+    /// Highlighted row; arrow keys move it, Enter activates it. A fresh list starts
+    /// it where clipdDefaultSelection says: on the newest copy when the panel
+    /// opens (which can sit below older starred rows), on the top match for a
+    /// search.
     @Published var selectedIndex = 0
     /// Bumped by the app layer each time the panel is shown. The view watches it
     /// and re-grabs keyboard focus for the search field. We can't rely on
@@ -38,17 +40,30 @@ final class SearchModel: ObservableObject {
         self.controller = controller
     }
 
+    /// Re-run the search and keep the highlight where it was (clamped). For when
+    /// the rows themselves change — pin, delete, clear — and the user's place in
+    /// the list still means something.
     func refresh() {
-        results = (try? controller.search(query, maxResults: 50)) ?? []
-        // Keep the selection valid as typing narrows the list.
+        runSearch()
         selectedIndex = clipdClampedSelection(selectedIndex, count: results.count)
     }
 
-    /// Reset to the freshly-opened state: empty query showing most recent.
+    /// The query changed (or the panel opened): re-run the search and start the
+    /// highlight fresh. The old row position means nothing in a new list — kept,
+    /// it would land on an arbitrary row.
+    func queryDidChange() {
+        runSearch()
+        selectedIndex = clipdDefaultSelection(query: query, results: results)
+    }
+
+    /// Reset to the freshly-opened state: empty query, newest copy highlighted.
     func reset() {
         query = ""
-        selectedIndex = 0
-        refresh()
+        queryDidChange()
+    }
+
+    private func runSearch() {
+        results = (try? controller.search(query, maxResults: 50)) ?? []
     }
 
     /// Move the highlight (delta -1 for ↑, +1 for ↓), clamped to the result range.

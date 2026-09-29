@@ -3,8 +3,10 @@ import AppKit
 import ClipdKit
 
 /// The unified search panel (PRD FR3+FR4 merged): a query field over a list of
-/// matches. Empty query shows the most recent entries; Enter activates the
-/// highlighted row; ⌘1–9 jump to the Nth recent; a click activates that row.
+/// matches. Empty query shows the most recent entries, and the panel opens with
+/// the newest copy highlighted (even below starred rows); a search highlights its
+/// top match. Enter activates the highlighted row; ⌘1–9 jump to the Nth row; a
+/// click activates that row.
 /// Each row may show a content-type affordance (open link / compose / swatch).
 /// Arrow-key navigation is driven from AppDelegate's local key monitor.
 struct SearchView: View {
@@ -21,7 +23,7 @@ struct SearchView: View {
                 .focused($queryFocused)
                 // Enter is handled by AppDelegate's key monitor (focus-independent),
                 // so there's no `.onSubmit` here — see installKeyMonitor().
-                .onChange(of: model.query) { _ in model.refresh() }
+                .onChange(of: model.query) { _ in model.queryDidChange() }
 
             Divider()
 

@@ -41,9 +41,11 @@ struct SettingsView: View {
 /// what gets recorded, History decides how much of it survives.
 ///
 /// Both controls are bounded and offer no "unlimited" option (see
-/// ClipdHistoryLimits), and both commit on a real gesture — Enter, focus loss, a
-/// stepper click, a picker selection. There is no Apply button and no debounce
-/// timer: a change applies live, after a confirmation if it would evict.
+/// ClipdHistoryLimits), and both commit on a real gesture — Enter, focus loss
+/// (including a click on blank space in the tab), a stepper click, a picker
+/// selection. There is no Apply button and no debounce timer: a change applies
+/// live, after a confirmation if it would evict. The entries field accepts only
+/// digits, and refuses an out-of-range count rather than clamping it.
 ///
 /// The two values live in local state rather than binding straight to
 /// ClipdSettings, because a cancelled confirmation has to revert without ever
@@ -77,14 +79,22 @@ struct HistorySettingsView: View {
                     .multilineTextAlignment(.trailing)
                     .focused($entriesFocused)
                     .onSubmit { commitEntries() }
+                    // Drop anything but digits the moment it's typed or pasted.
+                    // Writing the filtered text back re-fires this once, as a no-op.
+                    .onChange(of: entriesText) { text in
+                        let digits = ClipdHistoryLimits.digitsOnly(text)
+                        if digits != text { entriesText = digits }
+                    }
                 Stepper("", value: entriesStepper,
                         in: ClipdHistoryLimits.minEntries...ClipdHistoryLimits.maxEntries,
                         step: 100)
                     .labelsHidden()
                 Text("entries")
             }
-            Text("\(ClipdHistoryLimits.minEntries.formatted())–"
-                + "\(ClipdHistoryLimits.maxEntries.formatted()) entries.")
+            // The range, or — while the box holds a count that isn't in force —
+            // how to apply it or what the box accepts. Keeps the field from ever
+            // silently showing a number that isn't the real cap.
+            Text(entriesEdit.caption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -146,6 +156,14 @@ struct HistorySettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(20)
+        // A click on blank space or a label doesn't move keyboard focus on macOS,
+        // so without this the field keeps focus and never commits. Filling the tab
+        // with a tappable shape and dropping focus on a tap routes that click into
+        // the focus-loss commit below. The pickers, stepper, and checkbox are
+        // AppKit controls that take their own clicks, so this never sees those.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture { entriesFocused = false }
         .onAppear(perform: reseed)
         // No publisher observation here on purpose: both commit paths reseed from
         // `settings` afterwards, and this view is the only thing that changes
@@ -157,7 +175,12 @@ struct HistorySettingsView: View {
         // Committing on focus loss is what makes "type a number and click away"
         // behave the same as pressing Enter.
         .onChange(of: entriesFocused) { isFocused in
-            if !isFocused { commitEntries() }
+            // Deferred one turn: SwiftUI runs onChange inside a Core Animation
+            // transaction commit, and AppKit suppresses NSAlert.runModal() there
+            // ("cannot run inside a transaction… commit"), so a reduction's
+            // confirmation never appeared and the suppressed alert read as a
+            // Cancel. Enter's .onSubmit runs outside that commit and needs no hop.
+            if !isFocused { DispatchQueue.main.async { commitEntries() } }
         }
     }
 
@@ -167,10 +190,20 @@ struct HistorySettingsView: View {
         retentionDays = ClipdRetention.sanitize(settings.retentionDays)
     }
 
+    /// What the box holds, judged against the count in force.
+    private var entriesEdit: ClipdEntriesEdit {
+        ClipdEntriesEdit(text: entriesText, current: settings.maxEntries)
+    }
+
     /// The stepper drives the same text field the user can type into, and a click
-    /// is itself a commit gesture.
+    /// is itself a commit gesture. It steps from the typed count only when that's
+    /// a valid edit; from anything else it steps from the count in force, because
+    /// clamping junk first would apply a number nobody typed.
     private var entriesStepper: Binding<Int> {
-        Binding(get: { parsedEntries },
+        Binding(get: {
+                    if case .valid(let typed) = entriesEdit { return typed }
+                    return settings.maxEntries
+                },
                 set: { entriesText = String($0); commitEntries() })
     }
 
@@ -178,21 +211,21 @@ struct HistorySettingsView: View {
         Binding(get: { byteBudget }, set: { commitBudget($0) })
     }
 
-    /// Digits only, then clamped — so a half-typed "1" can never reach the store
-    /// as a one-entry history, and a paste of junk falls back to what is in force.
-    private var parsedEntries: Int {
-        let digits = entriesText.filter(\.isWholeNumber)
-        return ClipdHistoryLimits.clampEntries(Int(digits) ?? settings.maxEntries)
-    }
-
     private func commitEntries() {
-        let proposed = parsedEntries
-        // Pass the *committed* budget, not the local one, so each control commits
-        // only its own change and a confirmation names only what actually moved.
-        if proposed != settings.maxEntries {
+        switch entriesEdit {
+        case .valid(let proposed):
+            // Pass the *committed* budget, not the local one, so each control
+            // commits only its own change and a confirmation names only what
+            // actually moved.
             _ = onCommit(proposed, settings.maxBytes)
+        case .invalid:
+            // Refused, never clamped: a clamp saves a number nobody typed. The
+            // beep says "not applied"; reseed() snaps the box back below.
+            NSSound.beep()
+        case .unchanged:
+            break
         }
-        reseed()  // settings is the truth, whether the change applied or was cancelled
+        reseed()  // settings is the truth, whether the change applied, was cancelled, or was refused
     }
 
     private func commitBudget(_ proposed: UInt64) {

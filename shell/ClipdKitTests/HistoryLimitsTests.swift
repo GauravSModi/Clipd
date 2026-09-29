@@ -13,14 +13,6 @@ final class HistoryLimitsTests: XCTestCase {
         XCTAssertEqual(ClipdHistoryLimits.maxEntries, 100_000)
     }
 
-    func testClampEntriesHoldsBothEnds() {
-        XCTAssertEqual(ClipdHistoryLimits.clampEntries(50), 100)
-        XCTAssertEqual(ClipdHistoryLimits.clampEntries(0), 100)
-        XCTAssertEqual(ClipdHistoryLimits.clampEntries(-7), 100)
-        XCTAssertEqual(ClipdHistoryLimits.clampEntries(1_000_000), 100_000)
-        XCTAssertEqual(ClipdHistoryLimits.clampEntries(5_000), 5_000)
-    }
-
     /// The UI offers no "unlimited" option, so 0 must never be reachable through
     /// the picker even though clipd.h still documents 0 as unbounded for API
     /// callers.
@@ -158,5 +150,74 @@ extension HistoryLimitsTests {
         for option in ClipdHistoryLimits.byteBudgetOptions {
             XCTAssertEqual(ClipdHistoryLimits.nearestByteBudget(to: option), option)
         }
+    }
+}
+
+// MARK: - The "Keep at most" field
+//
+// Bugs 3 and 4 from the 2026-09-23 run-the-app test: the field accepted letters,
+// and an out-of-range number was clamped and saved without a word.
+
+extension HistoryLimitsTests {
+    /// The filter runs on every edit, typed or pasted, so nothing but digits can
+    /// sit in the box.
+    func testDigitsOnlyDropsEverythingButDigits() {
+        XCTAssertEqual(ClipdHistoryLimits.digitsOnly("12a3"), "123")
+        XCTAssertEqual(ClipdHistoryLimits.digitsOnly("abc"), "")
+        XCTAssertEqual(ClipdHistoryLimits.digitsOnly("10,000"), "10000")  // a pasted grouped number
+        XCTAssertEqual(ClipdHistoryLimits.digitsOnly(" 2 0 0 "), "200")
+        XCTAssertEqual(ClipdHistoryLimits.digitsOnly(""), "")
+    }
+
+    /// Swift counts these as whole numbers, but Int() can't parse them — let one
+    /// in and the box holds a "number" that can never be applied.
+    func testDigitsOnlyDropsNonASCIIDigits() {
+        XCTAssertEqual(ClipdHistoryLimits.digitsOnly("٣٤"), "")   // Arabic-Indic 3, 4
+        XCTAssertEqual(ClipdHistoryLimits.digitsOnly("１２"), "")  // full-width 1, 2
+    }
+
+    /// An in-range number that differs from the one in force is the only thing the
+    /// field ever applies. Both bounds are inclusive.
+    func testAnInRangeNumberIsAValidEdit() {
+        XCTAssertEqual(ClipdEntriesEdit(text: "200", current: 10_000), .valid(200))
+        XCTAssertEqual(ClipdEntriesEdit(text: "100", current: 10_000), .valid(100))
+        XCTAssertEqual(ClipdEntriesEdit(text: "100000", current: 10_000), .valid(100_000))
+        XCTAssertEqual(ClipdEntriesEdit(text: "0200", current: 10_000), .valid(200))
+    }
+
+    /// Refused, never clamped: a clamp applies a number nobody typed. "10000200"
+    /// is how the 2026-09-23 run's cap became 100,000 — the caret landed after
+    /// "10000" and "200" went on the end.
+    func testAnOutOfRangeNumberIsInvalidNotClamped() {
+        XCTAssertEqual(ClipdEntriesEdit(text: "10000200", current: 10_000), .invalid)
+        XCTAssertEqual(ClipdEntriesEdit(text: "100001", current: 10_000), .invalid)
+        XCTAssertEqual(ClipdEntriesEdit(text: "99", current: 10_000), .invalid)
+        XCTAssertEqual(ClipdEntriesEdit(text: "0", current: 10_000), .invalid)
+    }
+
+    /// Too many digits for Int is just another out-of-range number — not a crash,
+    /// and not a silent fallback to something else.
+    func testANumberTooLongForIntIsInvalid() {
+        let huge = String(repeating: "9", count: 25)
+        XCTAssertEqual(ClipdEntriesEdit(text: huge, current: 10_000), .invalid)
+    }
+
+    /// Nothing to apply: an empty box (leaving it restores the value in force), or
+    /// the number already in force however it's written. The in-force check comes
+    /// before the range check, so a hand-edited value outside the UI's range can
+    /// sit in the box without a beep every time the user clicks away.
+    func testEmptyOrTheNumberInForceIsUnchanged() {
+        XCTAssertEqual(ClipdEntriesEdit(text: "", current: 10_000), .unchanged)
+        XCTAssertEqual(ClipdEntriesEdit(text: "10000", current: 10_000), .unchanged)
+        XCTAssertEqual(ClipdEntriesEdit(text: "010000", current: 10_000), .unchanged)
+        XCTAssertEqual(ClipdEntriesEdit(text: "500000", current: 500_000), .unchanged)
+    }
+
+    /// The caption is what keeps the box honest while it holds an unsaved number.
+    /// A refused number must never be captioned as if Return would apply it.
+    func testOnlyAValidEditIsCaptionedAsApplicable() {
+        XCTAssertTrue(ClipdEntriesEdit.valid(200).caption.contains("Return"))
+        XCTAssertFalse(ClipdEntriesEdit.invalid.caption.contains("Return"))
+        XCTAssertFalse(ClipdEntriesEdit.unchanged.caption.contains("Return"))
     }
 }

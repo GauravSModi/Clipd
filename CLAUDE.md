@@ -65,19 +65,41 @@ amendment (2026-08-18) that enumerates exactly which settings are in scope.
 ClipdKit is the single settings store (typed accessors over `UserDefaults` with
 explicit defaults, `ObservableObject` change signal, injectable suite for tests);
 it owns the cap defaults that used to be `private let` on `AppDelegate`, plus the
-two first-run flags under their original key strings. The Settings window is a
-`TabView` in an `NSWindow` + `NSHostingView` (no SwiftUI `Settings` scene — the
-app is AppKit-bootstrapped), opened from a "Settings…" status-menu item. The
-global hotkey is the one setting wired through; `KeyboardShortcuts` owns its own
-persistence, so it is not mirrored into `ClipdSettings`. Login-item state is owned
-by one `ObservableObject` (`ClipdLoginItem`) shared by the Settings checkbox and
-the status-menu item — a computed `Binding` over `SMAppService.status` never
-redraws, and re-reading that status immediately after register/unregister can
-still report the OLD value and snap the control back. Run-the-app verified
+two first-run flags under their original key strings. The Settings window is an
+`NSTabViewController` with `tabStyle = .toolbar` (`shell/Clipd/SettingsWindow.swift`),
+one `NSHostingController` per pane, opened from a "Settings…" status-menu item —
+not a SwiftUI `TabView`, which draws toolbar tabs only inside a SwiftUI `Settings`
+scene (the app is AppKit-bootstrapped) and an in-window segmented box anywhere
+else. The global hotkey is the one setting wired through; `KeyboardShortcuts`
+owns its own persistence, so it is not mirrored into `ClipdSettings`. Login-item
+state is owned by one `ObservableObject` (`ClipdLoginItem`) shared by the
+Settings switch and the status-menu item — a computed `Binding` over
+`SMAppService.status` never redraws, and re-reading that status immediately
+after register/unregister can still report the OLD value and snap the control
+back. Run-the-app verified
 (2026-08-18): the Settings window opens from the status menu, rebinding the
 hotkey works and survives a restart, Reset to Default restores ⌘⇧V, the status
 menu's shortcut hint follows the new binding, and the login-item toggle agrees
-across both surfaces.
+across both surfaces. **Redesigned 2026-09-29** (Mac-standard): every pane is a
+grouped `Form` (System Settings rows, switches, cards), and the window resizes to
+the selected pane and follows one whose content grows (a new excluded-app row,
+the entries subtitle) with no extra hook. The panes carry **no explanatory text**
+except the excluded-apps warning (`ClipdSettingsCopy.excludedAppsFooter`, pinned
+by `SettingsCopyTests`) — no captions, subtitles or ⓘ tooltips, by choice; the
+caveats for the caps, retention and clear-on-quit live only in the confirmation
+alerts those settings raise. A shortcut cleared with the recorder's ✕ and never
+replaced is put back when the recording ends (Reset still restores ⌘⇧V); the
+library has no public hook for that, so `GeneralSettingsView` observes its
+internal `KeyboardShortcuts_recorderActiveStatusDidChange` notification by string.
+**Watch:** size a pane from `fittingSize` measured once the window is on screen
+(`viewDidAppear`, tab switch), never from `preferredContentSize` — a hosting
+controller inside a tab controller never publishes one. **Watch:** the ✕
+refocuses the recorder, which posts "stopped" then "started" back to back, so the
+restore waits one run-loop turn; restoring on that first "stopped" re-registered
+the hotkey mid-recording, where it swallowed its own keystroke. Run-the-app
+verified (2026-09-29): every tab in dark and light, pause and login agreement with
+the status menu, excluded apps growing and shrinking the window, and hotkey
+rebind, Reset and clear-restore.
 
 **Stage 2 (capture gates) is shipped**, shell-only: a new pure `CapturePolicy`
 value in ClipdKit (pause flag + per-kind allow flags) plus `clipdSelectCapture`,
@@ -90,7 +112,7 @@ filename). `PasteboardMonitor` reads the policy through an injected
 `() -> CapturePolicy` provider, re-evaluated every poll, so a settings change
 takes effect without rebuilding the monitor. Pause is persisted in `ClipdSettings`
 (`captureIsPaused` + `capturesText`/`capturesImages`/`capturesFiles`) — it
-survives a restart on purpose, since it has a Settings checkbox and is a setting.
+survives a restart on purpose, since it has a Settings switch and is a setting.
 Surfaced from both a "Pause Capture" status-menu item (checkmark) and a new
 **Capture** tab in Settings; both read/write the same `ClipdSettings` property, so
 they can't disagree. The status-item icon swaps `doc.on.clipboard` → `pause.circle`
@@ -121,11 +143,11 @@ view holds no list logic. UI is an `NSOpenPanel` app picker + `−` button in th
 Capture tab (`shell/Clipd/ExcludedAppsView.swift`); display names resolve via
 `NSWorkspace` with a raw-bundle-id fallback, and that file lives in the **Clipd
 target, not ClipdKit**, because NSWorkspace/NSOpenPanel are AppKit. The tab carries
-the honest framing in visible copy (best-effort frontmost check with a timing
-window, **not** security) plus a caption warning that removing the Apple rows can
-leave passwords in the plaintext history. The Settings window grew to 460×460 for
-the list. Run-the-app verified (2026-08-20): add/remove changes capture without a
-restart, the list survives quit/relaunch, and both tabs lay out cleanly.
+the honest framing in its one footer (best-effort frontmost check with a timing
+window, **not** security, and a warning that removing the Apple rows can leave
+passwords in the plaintext history). Run-the-app verified (2026-08-20):
+add/remove changes capture without a restart, the list survives quit/relaunch,
+and both tabs lay out cleanly.
 **Watch:** the Stage 2 per-kind filters persist like pause does, so a filter left
 off during testing reads later as "the app captures nothing" — check
 `defaults read com.clipd.Clipd` (`clipd.capturesText` etc.) before debugging capture.
@@ -146,11 +168,12 @@ lowering it could not retroactively remove a stored image. The setter does
 existing threshold, which keeps the documented "raising the cap can recover
 evicted entries from the log *only before* the next compaction" grace intact.
 Shell: a new **History** tab (caps are about how much is kept; Capture is about
-what gets recorded), with bounded controls only — 100–100,000 entries via
-field+stepper, a preset picker for the budget, and no "unlimited" option, so the
-UI can't produce a value `ClipdSettings.positiveInt` treats as corrupt (the
-0-means-unbounded C contract is unchanged for API callers). A reduction is
-confirmed **only when it would actually evict**; the count it names is an
+what gets recorded), with bounded controls only — 100–100,000 entries via a
+text field (its stepper was dropped 2026-09-29), a preset picker for the budget,
+and no "unlimited" option, so the UI can't produce a value
+`ClipdSettings.positiveInt` treats as corrupt (the 0-means-unbounded C contract
+is unchanged for API callers). A reduction is confirmed **only when it would
+actually evict**; the count it names is an
 **upper bound** ("up to N"), because pinned entries are exempt and `ClipdStats`
 carries no pinned count, and a byte reduction names sizes rather than a count.
 The alert copy promises neither permanence nor recoverability — a
@@ -175,14 +198,23 @@ refuses those shortcuts as the global hotkey; (3) letters were accepted —
 `ClipdHistoryLimits.digitsOnly` now filters every edit, typed or pasted; (4) an
 out-of-range count was clamped to 100,000 and saved silently (the caret landed
 after "10000", so typing "200" made "10000200") — `ClipdEntriesEdit` now refuses
-it with a beep and a snap-back, **never a clamp**, and its caption says whenever
-the box holds a count that isn't in force. **Watch:** SwiftUI runs `.onChange`
+it with a beep and a snap-back, **never a clamp**, and its caption — the row's
+gray subtitle, shown **only** while the box holds a count that isn't in force —
+says how to apply it or what the box accepts. **Watch:** SwiftUI runs `.onChange`
 inside a Core Animation transaction commit, where AppKit *suppresses*
 `NSAlert.runModal()` (logging "Suppressing invocation of -[NSAlert runModal]")
 and the suppressed alert reads as Cancel. The focus-loss commit therefore hops to
 the next run-loop turn (`DispatchQueue.main.async`) before it can confirm; any
 confirmation raised from an `onChange` needs the same hop, while Binding setters
-and `.onSubmit` run outside the commit and don't.
+and `.onSubmit` run outside the commit and don't. While a typed count is pending,
+changing Storage budget, retention or clear-on-quit **settles the count first**
+(`commitPendingEntries()`: its confirmation or its beep), then asks about its own
+change; a cancel on the first doesn't block the second. Those are AppKit controls
+that never take focus, so without this the count waited behind their
+confirmation. **Watch:** a grouped `Form` draws a `TextField` as plain text, with
+the arrow pointer until the first click — use `.textFieldStyle(.roundedBorder)`
+plus `textPointer()` (`.pointerStyle(.horizontalText)`, macOS 15+); the box alone
+doesn't bring the I-beam.
 
 **Stage 5 (retention: age expiry + clear-on-quit) is shipped** — the second
 stage to open C++, riding the **existing** TOMBSTONE control record rather than
@@ -198,7 +230,7 @@ on the thing it's for. **`ClipStore` gains nothing** — no timestamp-aware bulk
 op — so `upsert` and `set_limits` remain its only two eviction triggers; expiry
 is a removal path, not a third one. **Pinned entries are exempt**, the same
 exemption `clear()` and eviction use, so a retention period is *not* a blanket
-guarantee that nothing older survives — say so wherever the period is surfaced.
+guarantee that nothing older survives — the confirmation the period raises says so.
 New `clipd_delete_older_than(core, cutoff_ms, size_t* out_removed)` mirrors
 `clipd_set_limits`'s conventions (NULL handle safe, out-param optional). Shell:
 a new `ClipdRetention` pure helper (day options **with an explicit `Never` row**
@@ -206,16 +238,21 @@ a new `ClipdRetention` pure helper (day options **with an explicit `Never` row**
 default, not an absurd value) drives a History-tab picker that sweeps at launch
 and hourly; a **shortening** of the period confirms (naming no count — a dry-run
 pass would be needed to know one), lengthening or picking Never applies
-silently. Clear-on-quit is a separate checkbox wired to `applicationWillTerminate`
+silently. Clear-on-quit is a separate switch wired to `applicationWillTerminate`
 → the existing `clipd_clear` (so it's clear-**unpinned**, best-effort — a force
 quit or abrupt logout never runs it, and it can make quitting visibly slow
 because `clear()` compacts); it confirms only on **enabling**, never at quit
 time. Both alerts' wording is pinned by `RetentionTests` to promise **neither
-permanence nor recoverability** and to name the pinned exemption. Run-the-app
-verified (2026-09-23, same run): shortening Never → 30 days confirmed, Cancel
-snapped the picker back, and confirming removed exactly the unpinned entries
-past the cutoff (1,697 of 2,049, reconciled by entry id) and compacted (log
-3.0 MB → 480 KB, orphan blobs GC'd); lengthening applied silently. Clear-on-quit
+permanence nor recoverability** and to name the pinned exemption. The
+clear-on-quit alert was cut to two short sentences on 2026-09-29, by request: it
+names the pinned exemption but **no longer mentions best-effort or slow quits**,
+so the best-effort caveat is no longer shown anywhere in the UI (it lives here
+and in code comments); `RetentionTests` pins the exemption plus a 90-character
+cap on its body. Run-the-app verified (2026-09-23, same run): shortening
+Never → 30 days confirmed, Cancel snapped the picker back, and confirming
+removed exactly the unpinned entries past the cutoff (1,697 of 2,049, reconciled
+by entry id) and compacted (log 3.0 MB → 480 KB, orphan blobs GC'd); lengthening
+applied silently. Clear-on-quit
 confirms only on enabling (Cancel leaves it off), and a normal quit left only
 the pinned entry, with every blob reclaimed. The stored period and checkbox
 survived that restart in `UserDefaults`; the tab's display of them after the
@@ -381,9 +418,11 @@ stable Development identity so the grant survives rebuilds.
   blocks are never overwritten. Don't overclaim any of this as secure deletion.
 - **Pinned is exempt from the byte budget, not just the count cap.** Pinning many
   large images can push total on-disk usage past `max_bytes` (pinned entries are
-  never evicted to reclaim space). State the trade-off; don't silently start
+  never evicted to reclaim space). The budget's confirmation states it ("Pinned
+  entries are kept"); the Settings pane carries no caption. Don't silently start
   evicting pins.
 - **Pinned entries never expire.** Age-based retention only sweeps unpinned
   entries, so "delete after N days" is not a guarantee that nothing older
-  survives — a pinned entry from years ago is kept forever. State this
-  wherever a retention period is surfaced; don't imply it's a blanket cutoff.
+  survives — a pinned entry from years ago is kept forever. The retention
+  confirmation states this; the Settings pane carries no caption. Don't imply
+  it's a blanket cutoff.

@@ -416,25 +416,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - Settings
 
-    /// Show the Settings window, building it on first use. Hosts SettingsView in a
-    /// plain NSWindow the same way setupPanel() hosts SearchView — the app is
-    /// AppKit-bootstrapped, so there's no SwiftUI Settings scene to use.
+    /// Show the Settings window, building it on first use: toolbar tabs from
+    /// SettingsTabViewController, one SwiftUI pane per tab (SettingsWindow.swift
+    /// explains why this isn't a SwiftUI TabView).
     ///
     /// Deliberately NOT given `self` as its delegate: windowDidResignKey is the
     /// search panel's auto-dismiss hook and must stay panel-only.
     @objc private func showSettings() {
         if settingsWindow == nil {
-            // Sized for the tallest tab (History, once retention and
-            // clear-on-quit joined the two caps); SettingsView's own frame must
-            // match.
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 580),
-                                  styleMask: [.titled, .closable],
-                                  backing: .buffered,
-                                  defer: false)
-            window.title = "Clipd Settings"
-            window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: SettingsView(
-                onCommitHistoryLimits: { [weak self] maxEntries, maxBytes in
+            let tabs = SettingsTabViewController()
+            tabs.addPane("General", systemImage: "gearshape", GeneralSettingsView())
+            tabs.addPane("History", systemImage: "clock", HistorySettingsView(
+                onCommit: { [weak self] maxEntries, maxBytes in
                     self?.applyHistoryLimits(maxEntries: maxEntries,
                                              maxBytes: maxBytes) ?? false
                 },
@@ -444,6 +437,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 onCommitClearOnQuit: { [weak self] enabled in
                     self?.applyClearOnQuit(enabled) ?? false
                 }))
+            tabs.addPane("Capture", systemImage: "clipboard", CaptureSettingsView())
+
+            // No size here: the tab controller sizes the window to each pane. This
+            // initializer also makes the window resizable and miniaturizable,
+            // which a settings window isn't — hence the explicit style mask.
+            let window = NSWindow(contentViewController: tabs)
+            window.styleMask = [.titled, .closable]
+            window.toolbarStyle = .preference  // centered icon-over-label tabs
+            window.isReleasedWhenClosed = false
             settingsWindow = window
         }
         // An .accessory app has to activate explicitly for its window to take focus

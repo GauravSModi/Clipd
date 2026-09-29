@@ -108,14 +108,18 @@ final class RetentionTests: XCTestCase {
         XCTAssertEqual(ClipdRetentionChange.none.informativeText, "")
     }
 
-    /// The three things that surprise people about clear-on-quit: it keeps pins,
-    /// it is best-effort, and it can make quitting slow.
-    func testClearOnQuitCopyStatesAllThreeCaveats() {
+    /// The one fact the alert must carry: clearing keeps pinned entries.
+    func testClearOnQuitCopyNamesThePinnedExemption() {
         let text = (ClipdClearOnQuit.messageText + " "
             + ClipdClearOnQuit.informativeText).lowercased()
-        XCTAssertTrue(text.contains("pinned"))
-        XCTAssertTrue(text.contains("force quit"))
-        XCTAssertTrue(text.contains("best-effort"))
+        XCTAssertTrue(text.contains("unpinned"))
+        XCTAssertTrue(text.contains("pinned entries are kept"))
+    }
+
+    /// Kept short on purpose (2026-09-29): the best-effort and slow-quit caveats
+    /// were cut from the alert, so it says only what switching this on does.
+    func testClearOnQuitCopyStaysShort() {
+        XCTAssertLessThanOrEqual(ClipdClearOnQuit.informativeText.count, 90)
     }
 
     func testClearOnQuitCopyDoesNotOverclaimErasure() {

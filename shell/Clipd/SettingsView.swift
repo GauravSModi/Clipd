@@ -3,49 +3,18 @@ import ServiceManagement
 import KeyboardShortcuts
 import ClipdKit
 
-/// The Settings window's content. Tabbed from the start so later settings land as
-/// new tabs rather than a restructure; only General exists today.
-///
-/// The app is AppKit-bootstrapped (main.swift builds NSApplication directly), so
-/// there is no SwiftUI `Settings` scene — AppDelegate hosts this in an NSWindow via
-/// NSHostingView, the same way setupPanel() hosts SearchView.
-struct SettingsView: View {
-    /// Applies a proposed pair of history caps, confirming first if the change
-    /// would evict. Returns false when the user cancels, so the History tab can
-    /// snap its controls back. Owned by AppDelegate: the alert is AppKit, and the
-    /// live-set stats it needs come from the controller.
-    let onCommitHistoryLimits: (Int, UInt64) -> Bool
-    /// Applies a proposed retention period, confirming first if it would start
-    /// deleting entries, then sweeping at once. Returns false on a cancel.
-    let onCommitRetention: (Int) -> Bool
-    /// Applies the clear-on-quit setting, confirming when it is switched ON.
-    let onCommitClearOnQuit: (Bool) -> Bool
-
-    var body: some View {
-        TabView {
-            GeneralSettingsView()
-                .tabItem { Label("General", systemImage: "gearshape") }
-            HistorySettingsView(onCommit: onCommitHistoryLimits,
-                                onCommitRetention: onCommitRetention,
-                                onCommitClearOnQuit: onCommitClearOnQuit)
-                .tabItem { Label("History", systemImage: "clock") }
-            CaptureSettingsView()
-                .tabItem { Label("Capture", systemImage: "clipboard") }
-        }
-        .frame(width: 460, height: 560)
-        .padding(.top, 8)
-    }
-}
+// The Settings window's panes, one per toolbar tab. SettingsWindow.swift builds
+// the window and the tabs around them.
 
 /// History: how much is kept. Separate from Capture on purpose — Capture decides
 /// what gets recorded, History decides how much of it survives.
 ///
 /// Both controls are bounded and offer no "unlimited" option (see
 /// ClipdHistoryLimits), and both commit on a real gesture — Enter, focus loss
-/// (including a click on blank space in the tab), a stepper click, a picker
-/// selection. There is no Apply button and no debounce timer: a change applies
-/// live, after a confirmation if it would evict. The entries field accepts only
-/// digits, and refuses an out-of-range count rather than clamping it.
+/// (including a click on blank space in the tab), a picker selection. There is
+/// no Apply button and no debounce timer: a change applies live, after a
+/// confirmation if it would evict. The entries field accepts only digits, and
+/// refuses an out-of-range count rather than clamping it.
 ///
 /// The two values live in local state rather than binding straight to
 /// ClipdSettings, because a cancelled confirmation has to revert without ever
@@ -53,8 +22,15 @@ struct SettingsView: View {
 /// both commit paths re-seed from it whether the user accepted or cancelled.
 struct HistorySettingsView: View {
     @ObservedObject private var settings = ClipdSettings.shared
+    /// Applies a proposed pair of history caps, confirming first if the change
+    /// would evict. Returns false when the user cancels, so this tab can snap its
+    /// controls back. Owned by AppDelegate: the alert is AppKit, and the live-set
+    /// stats it needs come from the controller.
     let onCommit: (Int, UInt64) -> Bool
+    /// Applies a proposed retention period, confirming first if it would start
+    /// deleting entries, then sweeping at once. Returns false on a cancel.
     let onCommitRetention: (Int) -> Bool
+    /// Applies the clear-on-quit setting, confirming when it is switched ON.
     let onCommitClearOnQuit: (Bool) -> Bool
 
     @State private var entriesText = ""
@@ -72,96 +48,80 @@ struct HistorySettingsView: View {
 
     var body: some View {
         Form {
-            HStack(spacing: 6) {
-                Text("Keep at most")
-                TextField("", text: $entriesText)
-                    .frame(width: 72)
-                    .multilineTextAlignment(.trailing)
-                    .focused($entriesFocused)
-                    .onSubmit { commitEntries() }
-                    // Drop anything but digits the moment it's typed or pasted.
-                    // Writing the filtered text back re-fires this once, as a no-op.
-                    .onChange(of: entriesText) { text in
-                        let digits = ClipdHistoryLimits.digitsOnly(text)
-                        if digits != text { entriesText = digits }
+            // "Limits" is how much is kept, by count and by size. Retention below
+            // is how LONG — a separate section on purpose (see its comment).
+            Section("Limits") {
+                LabeledContent {
+                    HStack(spacing: 6) {
+                        TextField("", text: $entriesText)
+                            .labelsHidden()
+                            // A grouped Form draws a field as plain text, with no
+                            // box, so it doesn't read as editable. The bordered
+                            // style gives it one; textPointer() gives it the I-beam.
+                            .textFieldStyle(.roundedBorder)
+                            .textPointer()
+                            .frame(width: 72)
+                            .multilineTextAlignment(.trailing)
+                            .focused($entriesFocused)
+                            .onSubmit { commitEntries() }
+                            // Drop anything but digits the moment it's typed or
+                            // pasted. Writing the filtered text back re-fires this
+                            // once, as a no-op.
+                            .onChange(of: entriesText) { text in
+                                let digits = ClipdHistoryLimits.digitsOnly(text)
+                                if digits != text { entriesText = digits }
+                            }
+                        Text("entries")
                     }
-                Stepper("", value: entriesStepper,
-                        in: ClipdHistoryLimits.minEntries...ClipdHistoryLimits.maxEntries,
-                        step: 100)
-                    .labelsHidden()
-                Text("entries")
-            }
-            // The range, or — while the box holds a count that isn't in force —
-            // how to apply it or what the box accepts. Keeps the field from ever
-            // silently showing a number that isn't the real cap.
-            Text(entriesEdit.caption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                } label: {
+                    Text("Keep at most")
+                    // A second Text in a grouped row's label draws as its gray
+                    // subtitle. Shown only while the box holds a count that isn't
+                    // in force — how to apply it, or what the box accepts — so the
+                    // field never silently shows a number that isn't the real cap.
+                    if entriesEdit != .unchanged {
+                        Text(entriesEdit.caption)
+                    }
+                }
 
-            Divider().padding(.vertical, 4)
-
-            Picker("Storage budget:", selection: budgetSelection) {
-                ForEach(ClipdHistoryLimits.byteBudgetOptions, id: \.self) { option in
-                    Text(ClipdHistoryLimits.label(forBytes: option)).tag(option)
+                Picker("Storage budget", selection: budgetSelection) {
+                    ForEach(ClipdHistoryLimits.byteBudgetOptions, id: \.self) { option in
+                        Text(ClipdHistoryLimits.label(forBytes: option)).tag(option)
+                    }
                 }
             }
-            .frame(width: 240)
 
-            Text("Clipd evicts its least-recent entries once either limit is "
-                + "reached. Lowering a limit takes effect right away — Clipd asks "
-                + "first if entries would be removed.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text("Pinned entries are never evicted, so pinning a lot of large "
-                + "images can keep Clipd above the storage budget.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider().padding(.vertical, 4)
-
-            // Retention lives here, not in Capture: how LONG an entry is kept is
-            // the same question as how MANY are kept. Unlike the two caps above,
-            // this picker does offer a "never" row — that is the default and a
-            // normal choice, not the absurd value an unbounded cap would be.
-            Picker("Delete entries older than:", selection: retentionSelection) {
-                ForEach(ClipdRetention.dayOptions, id: \.self) { days in
-                    Text(ClipdRetention.label(forDays: days)).tag(days)
+            // Retention lives in its own section, not folded into Limits: how LONG
+            // an entry is kept is a different question from how MANY are kept.
+            // Unlike the two caps above, this picker does offer a "never" row —
+            // that is the default and a normal choice, not the absurd value an
+            // unbounded cap would be. Its caveats (pins never expire) are in the
+            // confirmation it raises.
+            Section("Retention") {
+                Picker("Delete entries older than", selection: retentionSelection) {
+                    ForEach(ClipdRetention.dayOptions, id: \.self) { days in
+                        Text(ClipdRetention.label(forDays: days)).tag(days)
+                    }
                 }
+
+                // Its caveats (pins kept, best-effort) are in the confirmation
+                // that switching it on raises.
+                Toggle("Clear history when Clipd quits", isOn: clearOnQuitSelection)
             }
-            .frame(width: 260)
-
-            Text("Clipd checks when it starts and periodically while running, so "
-                + "an entry can outlive its period by a while. Pinned entries "
-                + "never expire, so some older entries can remain.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider().padding(.vertical, 4)
-
-            Toggle("Clear history when Clipd quits", isOn: clearOnQuitSelection)
-                .toggleStyle(.checkbox)
-
-            Text("Unpinned entries only — pinned entries are kept. Best-effort: a "
-                + "force quit or a sudden logout skips it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            // The honest floor, on the tab where it matters most: this is
-            // removal, not erasure, and the store is still local plaintext.
-            Text("Removing an entry drops it from Clipd’s history and rewrites the "
-                + "log — it does not overwrite the underlying disk space, and "
-                + "Clipd’s history is stored as local plaintext either way.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
-        .padding(20)
+        .formStyle(.grouped)
+        .toggleStyle(WholeRowToggleStyle())
+        // Same sizing as the other panes: the window is sized to the pane, so the
+        // Form never needs to scroll, and fixedSize reports its full content
+        // height for that measurement.
+        .scrollDisabled(true)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 500)
         // A click on blank space or a label doesn't move keyboard focus on macOS,
         // so without this the field keeps focus and never commits. Filling the tab
         // with a tappable shape and dropping focus on a tap routes that click into
-        // the focus-loss commit below. The pickers, stepper, and checkbox are
-        // AppKit controls that take their own clicks, so this never sees those.
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // the focus-loss commit below. The pickers and switch are AppKit controls
+        // that take their own clicks, so this never sees those.
         .contentShape(Rectangle())
         .onTapGesture { entriesFocused = false }
         .onAppear(perform: reseed)
@@ -195,18 +155,6 @@ struct HistorySettingsView: View {
         ClipdEntriesEdit(text: entriesText, current: settings.maxEntries)
     }
 
-    /// The stepper drives the same text field the user can type into, and a click
-    /// is itself a commit gesture. It steps from the typed count only when that's
-    /// a valid edit; from anything else it steps from the count in force, because
-    /// clamping junk first would apply a number nobody typed.
-    private var entriesStepper: Binding<Int> {
-        Binding(get: {
-                    if case .valid(let typed) = entriesEdit { return typed }
-                    return settings.maxEntries
-                },
-                set: { entriesText = String($0); commitEntries() })
-    }
-
     private var budgetSelection: Binding<UInt64> {
         Binding(get: { byteBudget }, set: { commitBudget($0) })
     }
@@ -228,8 +176,19 @@ struct HistorySettingsView: View {
         reseed()  // settings is the truth, whether the change applied, was cancelled, or was refused
     }
 
+    /// Settles a typed count before another control on this tab applies its own
+    /// change, so that change's confirmation is never asked with a count still
+    /// waiting behind it. The pickers and switch are AppKit controls that don't
+    /// take focus, so clicking them never runs the focus-loss commit on its own.
+    /// A cancel here doesn't block the other control: they're separate changes.
+    private func commitPendingEntries() {
+        guard entriesEdit != .unchanged else { return }
+        commitEntries()
+    }
+
     private func commitBudget(_ proposed: UInt64) {
         guard proposed != settings.maxBytes else { return }
+        commitPendingEntries()
         byteBudget = proposed  // show the click immediately; reseed corrects a cancel
         _ = onCommit(settings.maxEntries, proposed)
         reseed()
@@ -241,6 +200,7 @@ struct HistorySettingsView: View {
         Binding(get: { retentionDays },
                 set: { proposed in
                     guard proposed != settings.retentionDays else { return }
+                    commitPendingEntries()
                     retentionDays = proposed
                     _ = onCommitRetention(proposed)
                     reseed()
@@ -251,34 +211,81 @@ struct HistorySettingsView: View {
     /// confirmation, and a cancel must leave nothing persisted.
     private var clearOnQuitSelection: Binding<Bool> {
         Binding(get: { settings.clearsHistoryOnQuit },
-                set: { _ = onCommitClearOnQuit($0) })
+                set: { enabled in
+                    commitPendingEntries()
+                    _ = onCommitClearOnQuit(enabled)
+                })
     }
 }
 
 /// General: the global hotkey and the login item. The shortcut owns its own
 /// persistence inside KeyboardShortcuts; the login item is owned by
 /// ClipdLoginItem, observed here so a toggle made in the status menu redraws this
-/// checkbox (and vice versa).
+/// switch (and vice versa).
 struct GeneralSettingsView: View {
     @ObservedObject private var loginItem = ClipdLoginItem.shared
+    /// The last real shortcut, restored if a recording ends with the box empty.
+    /// Kept up to date as it changes rather than captured when recording starts,
+    /// because the recorder's ✕ clears the shortcut BEFORE it starts recording.
+    @State private var lastShortcut = KeyboardShortcuts.getShortcut(for: .toggleClipd)
+    /// Whether the recorder is recording, as its last start/stop notification said.
+    @State private var isRecording = false
 
     var body: some View {
         Form {
-            KeyboardShortcuts.Recorder("Search Clipd:", name: .toggleClipd)
-
-            HStack {
-                Spacer()
-                Button("Reset to Default") { KeyboardShortcuts.reset(.toggleClipd) }
+            Section {
+                // The label-less recorder, so LabeledContent can put the label
+                // on the left and the recorder with Reset on the right.
+                LabeledContent("Search Clipd shortcut") {
+                    HStack {
+                        // onChange sees only the user's own edits here, and a
+                        // clear (nil) is deliberately not remembered.
+                        KeyboardShortcuts.Recorder(for: .toggleClipd) { shortcut in
+                            if let shortcut { lastShortcut = shortcut }
+                        }
+                        Button("Reset") {
+                            KeyboardShortcuts.reset(.toggleClipd)
+                            lastShortcut = KeyboardShortcuts.getShortcut(for: .toggleClipd)
+                        }
+                    }
+                }
             }
 
-            Divider().padding(.vertical, 4)
-
-            Toggle("Launch Clipd at login", isOn: Binding(
-                get: { loginItem.isEnabled },
-                set: { loginItem.setEnabled($0) }))
-                .toggleStyle(.checkbox)
+            Section {
+                Toggle("Launch Clipd at login", isOn: Binding(
+                    get: { loginItem.isEnabled },
+                    set: { loginItem.setEnabled($0) }))
+            }
         }
-        .padding(20)
+        .formStyle(.grouped)
+        .toggleStyle(WholeRowToggleStyle())
+        // Same sizing as CaptureSettingsView, which explains it.
+        .scrollDisabled(true)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 500)
+        // A shortcut cleared and never replaced would leave Clipd with no hotkey
+        // until someone noticed, so a recording that ends with the box empty —
+        // a click away, Esc, Tab, the window losing focus — puts back the last
+        // real one. Reset is still the way back to the default.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .clipdRecorderActiveStatusDidChange)) { note in
+            isRecording = note.userInfo?["isActive"] as? Bool ?? false
+            guard !isRecording else { return }
+            // Deferred one turn: the ✕ clears the shortcut and then refocuses the
+            // recorder, which posts "stopped" and "started" back to back. Restoring
+            // on that "stopped" re-registered the shortcut as a live global hotkey
+            // mid-recording — which then swallowed that very keystroke — and set it
+            // behind the field editor's back, so the box read empty. Only a stop
+            // that is still a stop a turn later is the user leaving the recorder.
+            DispatchQueue.main.async {
+                guard !isRecording,
+                      KeyboardShortcuts.getShortcut(for: .toggleClipd) == nil,
+                      let lastShortcut else { return }
+                // Posts the library's own change notification, which redraws the
+                // recorder and re-registers the global hotkey.
+                KeyboardShortcuts.setShortcut(lastShortcut, for: .toggleClipd)
+            }
+        }
         // Catch changes made outside the app (System Settings ▸ Login Items).
         .onAppear { loginItem.refresh() }
         .onReceive(NotificationCenter.default.publisher(
@@ -296,48 +303,87 @@ struct CaptureSettingsView: View {
 
     var body: some View {
         Form {
-            Toggle("Pause clipboard capture", isOn: $settings.captureIsPaused)
-                .toggleStyle(.checkbox)
+            Section {
+                Toggle("Pause capture", isOn: $settings.captureIsPaused)
+            }
 
-            Divider().padding(.vertical, 4)
-
-            Text("Capture these types:")
-            Toggle("Text", isOn: $settings.capturesText)
-                .toggleStyle(.checkbox)
-            Toggle("Images", isOn: $settings.capturesImages)
-                .toggleStyle(.checkbox)
-            Toggle("Files", isOn: $settings.capturesFiles)
-                .toggleStyle(.checkbox)
-
-            Text("These filters affect new copies only — nothing already saved is "
-                + "removed, and this is not encryption. Clipd's history is still "
-                + "stored as local plaintext.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider().padding(.vertical, 4)
+            Section("Capture types") {
+                Toggle("Text", isOn: $settings.capturesText)
+                Toggle("Images", isOn: $settings.capturesImages)
+                Toggle("Files", isOn: $settings.capturesFiles)
+            }
 
             // The framing here has to stay honest: this is a frontmost-app check
             // with a poll-interval race that only covers the listed apps. It is a
-            // best-effort heuristic, not security (see CLAUDE.md).
-            Text("Don’t capture from these apps:")
-            ExcludedAppsView(settings: settings)
-            Text("Clipd skips a copy while one of these apps is frontmost. It’s a "
-                + "best-effort check with a brief timing window — it can miss "
-                + "copies, and it is not a security guarantee.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("Apple’s Passwords and Keychain Access don’t mark copies as "
-                + "secret, so removing them can leave passwords in Clipd’s "
-                + "plaintext history.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            // best-effort heuristic, not security (see CLAUDE.md). This footer is
+            // the only explanation in the Settings window, on purpose.
+            Section {
+                ExcludedAppsView(settings: settings)
+            } header: {
+                Text("Don’t capture from these apps")
+            } footer: {
+                Text(ClipdSettingsCopy.excludedAppsFooter)
+            }
         }
-        .padding(20)
+        .formStyle(.grouped)
+        .toggleStyle(WholeRowToggleStyle())
+        // The window is sized to the pane, so the Form never needs to scroll;
+        // fixedSize reports the Form's full content height for that measurement.
+        .scrollDisabled(true)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 500)
     }
 }
 
-/// The single owner of login-item state, shared by the Settings checkbox and the
+/// Lets a click anywhere on a switch's row flip it — the label, the empty space
+/// between, or the card's margin around them — not only a click on the switch
+/// itself. It adds just that tap: `Toggle(configuration)` draws the toggle in the
+/// style it would have had anyway, a grouped Form's switch. A click on the switch
+/// itself is taken by the switch, an AppKit control, so it doesn't also reach the
+/// tap and flip it twice.
+private struct WholeRowToggleStyle: ToggleStyle {
+    /// How far a grouped Form insets a row's content from its card's edges and
+    /// from the divider below it — measured, not documented. Growing the tap area
+    /// by exactly this much fills the card without overlapping the next row's.
+    private static let rowInset: CGFloat = 10
+
+    func makeBody(configuration: Configuration) -> some View {
+        Toggle(configuration)
+            // Grow the tappable area out to the card's edges, then take the same
+            // amount back so the row's layout doesn't move.
+            .padding(Self.rowInset)
+            .contentShape(Rectangle())
+            .onTapGesture { configuration.isOn.toggle() }
+            .padding(-Self.rowInset)
+    }
+}
+
+private extension Notification.Name {
+    /// Posted by KeyboardShortcuts' recorder when it starts or stops recording
+    /// (`userInfo["isActive"]`). The library keeps the name internal — its own
+    /// SwiftUI helpers observe it — so it's mirrored here by its string (as of
+    /// 2.4.0). If a later version renames it, nothing arrives and a cleared
+    /// shortcut simply stays cleared, as it would without GeneralSettingsView's
+    /// restore.
+    static let clipdRecorderActiveStatusDidChange =
+        Notification.Name("KeyboardShortcuts_recorderActiveStatusDidChange")
+}
+
+private extension View {
+    /// The I-beam over a text field before it's clicked. The hosting view shows
+    /// the arrow over a field until it has focus, so without this the pointer
+    /// never says "editable" until the first click. `pointerStyle` is macOS 15+;
+    /// earlier systems keep the arrow until that click.
+    @ViewBuilder func textPointer() -> some View {
+        if #available(macOS 15, *) {
+            pointerStyle(.horizontalText)
+        } else {
+            self
+        }
+    }
+}
+
+/// The single owner of login-item state, shared by the Settings switch and the
 /// status-menu item so the two can't disagree: both read `isEnabled` and both
 /// mutate through `setEnabled`, and the @Published value redraws SwiftUI.
 ///

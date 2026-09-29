@@ -224,6 +224,12 @@ struct HistorySettingsView: View {
 /// switch (and vice versa).
 struct GeneralSettingsView: View {
     @ObservedObject private var loginItem = ClipdLoginItem.shared
+    /// The last real shortcut, restored if a recording ends with the box empty.
+    /// Kept up to date as it changes rather than captured when recording starts,
+    /// because the recorder's ✕ clears the shortcut BEFORE it starts recording.
+    @State private var lastShortcut = KeyboardShortcuts.getShortcut(for: .toggleClipd)
+    /// Whether the recorder is recording, as its last start/stop notification said.
+    @State private var isRecording = false
 
     var body: some View {
         Form {
@@ -232,8 +238,15 @@ struct GeneralSettingsView: View {
                 // on the left and the recorder with Reset on the right.
                 LabeledContent("Search Clipd shortcut") {
                     HStack {
-                        KeyboardShortcuts.Recorder(for: .toggleClipd)
-                        Button("Reset") { KeyboardShortcuts.reset(.toggleClipd) }
+                        // onChange sees only the user's own edits here, and a
+                        // clear (nil) is deliberately not remembered.
+                        KeyboardShortcuts.Recorder(for: .toggleClipd) { shortcut in
+                            if let shortcut { lastShortcut = shortcut }
+                        }
+                        Button("Reset") {
+                            KeyboardShortcuts.reset(.toggleClipd)
+                            lastShortcut = KeyboardShortcuts.getShortcut(for: .toggleClipd)
+                        }
                     }
                 }
             }
@@ -250,6 +263,29 @@ struct GeneralSettingsView: View {
         .scrollDisabled(true)
         .fixedSize(horizontal: false, vertical: true)
         .frame(width: 500)
+        // A shortcut cleared and never replaced would leave Clipd with no hotkey
+        // until someone noticed, so a recording that ends with the box empty —
+        // a click away, Esc, Tab, the window losing focus — puts back the last
+        // real one. Reset is still the way back to the default.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .clipdRecorderActiveStatusDidChange)) { note in
+            isRecording = note.userInfo?["isActive"] as? Bool ?? false
+            guard !isRecording else { return }
+            // Deferred one turn: the ✕ clears the shortcut and then refocuses the
+            // recorder, which posts "stopped" and "started" back to back. Restoring
+            // on that "stopped" re-registered the shortcut as a live global hotkey
+            // mid-recording — which then swallowed that very keystroke — and set it
+            // behind the field editor's back, so the box read empty. Only a stop
+            // that is still a stop a turn later is the user leaving the recorder.
+            DispatchQueue.main.async {
+                guard !isRecording,
+                      KeyboardShortcuts.getShortcut(for: .toggleClipd) == nil,
+                      let lastShortcut else { return }
+                // Posts the library's own change notification, which redraws the
+                // recorder and re-registers the global hotkey.
+                KeyboardShortcuts.setShortcut(lastShortcut, for: .toggleClipd)
+            }
+        }
         // Catch changes made outside the app (System Settings ▸ Login Items).
         .onAppear { loginItem.refresh() }
         .onReceive(NotificationCenter.default.publisher(
@@ -320,6 +356,17 @@ private struct WholeRowToggleStyle: ToggleStyle {
             .onTapGesture { configuration.isOn.toggle() }
             .padding(-Self.rowInset)
     }
+}
+
+private extension Notification.Name {
+    /// Posted by KeyboardShortcuts' recorder when it starts or stops recording
+    /// (`userInfo["isActive"]`). The library keeps the name internal — its own
+    /// SwiftUI helpers observe it — so it's mirrored here by its string (as of
+    /// 2.4.0). If a later version renames it, nothing arrives and a cleared
+    /// shortcut simply stays cleared, as it would without GeneralSettingsView's
+    /// restore.
+    static let clipdRecorderActiveStatusDidChange =
+        Notification.Name("KeyboardShortcuts_recorderActiveStatusDidChange")
 }
 
 private extension View {

@@ -98,7 +98,8 @@ public enum ClipdEntriesEdit: Equatable {
 
     /// The line under the field. The box can hold a count that isn't in force
     /// yet (mid-edit, or the window was closed before a commit), so the caption
-    /// is what keeps it from ever doing that silently.
+    /// is what keeps it from ever doing that silently. The History tab shows it
+    /// only then; the `.unchanged` range isn't on screen.
     public var caption: String {
         let low = ClipdHistoryLimits.minEntries.formatted()
         let high = ClipdHistoryLimits.maxEntries.formatted()

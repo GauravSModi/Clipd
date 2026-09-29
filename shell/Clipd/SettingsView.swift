@@ -11,10 +11,10 @@ import ClipdKit
 ///
 /// Both controls are bounded and offer no "unlimited" option (see
 /// ClipdHistoryLimits), and both commit on a real gesture — Enter, focus loss
-/// (including a click on blank space in the tab), a stepper click, a picker
-/// selection. There is no Apply button and no debounce timer: a change applies
-/// live, after a confirmation if it would evict. The entries field accepts only
-/// digits, and refuses an out-of-range count rather than clamping it.
+/// (including a click on blank space in the tab), a picker selection. There is
+/// no Apply button and no debounce timer: a change applies live, after a
+/// confirmation if it would evict. The entries field accepts only digits, and
+/// refuses an out-of-range count rather than clamping it.
 ///
 /// The two values live in local state rather than binding straight to
 /// ClipdSettings, because a cancelled confirmation has to revert without ever
@@ -61,18 +61,16 @@ struct HistorySettingsView: View {
                         let digits = ClipdHistoryLimits.digitsOnly(text)
                         if digits != text { entriesText = digits }
                     }
-                Stepper("", value: entriesStepper,
-                        in: ClipdHistoryLimits.minEntries...ClipdHistoryLimits.maxEntries,
-                        step: 100)
-                    .labelsHidden()
                 Text("entries")
             }
-            // The range, or — while the box holds a count that isn't in force —
-            // how to apply it or what the box accepts. Keeps the field from ever
-            // silently showing a number that isn't the real cap.
-            Text(entriesEdit.caption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            // Only while the box holds a count that isn't in force: how to apply
+            // it, or what the box accepts. Keeps the field from ever silently
+            // showing a number that isn't the real cap.
+            if entriesEdit != .unchanged {
+                Text(entriesEdit.caption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             Divider().padding(.vertical, 4)
 
@@ -83,23 +81,13 @@ struct HistorySettingsView: View {
             }
             .frame(width: 240)
 
-            Text("Clipd evicts its least-recent entries once either limit is "
-                + "reached. Lowering a limit takes effect right away — Clipd asks "
-                + "first if entries would be removed.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text("Pinned entries are never evicted, so pinning a lot of large "
-                + "images can keep Clipd above the storage budget.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             Divider().padding(.vertical, 4)
 
             // Retention lives here, not in Capture: how LONG an entry is kept is
             // the same question as how MANY are kept. Unlike the two caps above,
             // this picker does offer a "never" row — that is the default and a
             // normal choice, not the absurd value an unbounded cap would be.
+            // Its caveats (pins never expire) are in the confirmation it raises.
             Picker("Delete entries older than:", selection: retentionSelection) {
                 ForEach(ClipdRetention.dayOptions, id: \.self) { days in
                     Text(ClipdRetention.label(forDays: days)).tag(days)
@@ -107,36 +95,19 @@ struct HistorySettingsView: View {
             }
             .frame(width: 260)
 
-            Text("Clipd checks when it starts and periodically while running, so "
-                + "an entry can outlive its period by a while. Pinned entries "
-                + "never expire, so some older entries can remain.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             Divider().padding(.vertical, 4)
 
+            // Its caveats (pins kept, best-effort) are in the confirmation that
+            // switching it on raises.
             Toggle("Clear history when Clipd quits", isOn: clearOnQuitSelection)
                 .toggleStyle(.checkbox)
-
-            Text("Unpinned entries only — pinned entries are kept. Best-effort: a "
-                + "force quit or a sudden logout skips it.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            // The honest floor, on the tab where it matters most: this is
-            // removal, not erasure, and the store is still local plaintext.
-            Text("Removing an entry drops it from Clipd’s history and rewrites the "
-                + "log — it does not overwrite the underlying disk space, and "
-                + "Clipd’s history is stored as local plaintext either way.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .padding(20)
         // A click on blank space or a label doesn't move keyboard focus on macOS,
         // so without this the field keeps focus and never commits. Filling the tab
         // with a tappable shape and dropping focus on a tap routes that click into
-        // the focus-loss commit below. The pickers, stepper, and checkbox are
-        // AppKit controls that take their own clicks, so this never sees those.
+        // the focus-loss commit below. The pickers and checkbox are AppKit
+        // controls that take their own clicks, so this never sees those.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { entriesFocused = false }
@@ -169,18 +140,6 @@ struct HistorySettingsView: View {
     /// What the box holds, judged against the count in force.
     private var entriesEdit: ClipdEntriesEdit {
         ClipdEntriesEdit(text: entriesText, current: settings.maxEntries)
-    }
-
-    /// The stepper drives the same text field the user can type into, and a click
-    /// is itself a commit gesture. It steps from the typed count only when that's
-    /// a valid edit; from anything else it steps from the count in force, because
-    /// clamping junk first would apply a number nobody typed.
-    private var entriesStepper: Binding<Int> {
-        Binding(get: {
-                    if case .valid(let typed) = entriesEdit { return typed }
-                    return settings.maxEntries
-                },
-                set: { entriesText = String($0); commitEntries() })
     }
 
     private var budgetSelection: Binding<UInt64> {
@@ -285,12 +244,6 @@ struct CaptureSettingsView: View {
             Toggle("Files", isOn: $settings.capturesFiles)
                 .toggleStyle(.checkbox)
 
-            Text("These filters affect new copies only — nothing already saved is "
-                + "removed, and this is not encryption. Clipd's history is still "
-                + "stored as local plaintext.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             Divider().padding(.vertical, 4)
 
             // The framing here has to stay honest: this is a frontmost-app check
@@ -298,14 +251,7 @@ struct CaptureSettingsView: View {
             // best-effort heuristic, not security (see CLAUDE.md).
             Text("Don’t capture from these apps:")
             ExcludedAppsView(settings: settings)
-            Text("Clipd skips a copy while one of these apps is frontmost. It’s a "
-                + "best-effort check with a brief timing window — it can miss "
-                + "copies, and it is not a security guarantee.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("Apple’s Passwords and Keychain Access don’t mark copies as "
-                + "secret, so removing them can leave passwords in Clipd’s "
-                + "plaintext history.")
+            Text(ClipdSettingsCopy.excludedAppsFooter)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

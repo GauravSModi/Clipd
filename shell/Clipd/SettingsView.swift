@@ -48,67 +48,80 @@ struct HistorySettingsView: View {
 
     var body: some View {
         Form {
-            HStack(spacing: 6) {
-                Text("Keep at most:")
-                TextField("", text: $entriesText)
-                    .frame(width: 72)
-                    .multilineTextAlignment(.trailing)
-                    .focused($entriesFocused)
-                    .onSubmit { commitEntries() }
-                    // Drop anything but digits the moment it's typed or pasted.
-                    // Writing the filtered text back re-fires this once, as a no-op.
-                    .onChange(of: entriesText) { text in
-                        let digits = ClipdHistoryLimits.digitsOnly(text)
-                        if digits != text { entriesText = digits }
+            // "Limits" is how much is kept, by count and by size. Retention below
+            // is how LONG — a separate section on purpose (see its comment).
+            Section("Limits") {
+                LabeledContent {
+                    HStack(spacing: 6) {
+                        TextField("", text: $entriesText)
+                            .labelsHidden()
+                            // A grouped Form draws a field as plain text, with no
+                            // box, so it doesn't read as editable. The bordered
+                            // style gives it one; textPointer() gives it the I-beam.
+                            .textFieldStyle(.roundedBorder)
+                            .textPointer()
+                            .frame(width: 72)
+                            .multilineTextAlignment(.trailing)
+                            .focused($entriesFocused)
+                            .onSubmit { commitEntries() }
+                            // Drop anything but digits the moment it's typed or
+                            // pasted. Writing the filtered text back re-fires this
+                            // once, as a no-op.
+                            .onChange(of: entriesText) { text in
+                                let digits = ClipdHistoryLimits.digitsOnly(text)
+                                if digits != text { entriesText = digits }
+                            }
+                        Text("entries")
                     }
-                Text("entries")
-            }
-            // Only while the box holds a count that isn't in force: how to apply
-            // it, or what the box accepts. Keeps the field from ever silently
-            // showing a number that isn't the real cap.
-            if entriesEdit != .unchanged {
-                Text(entriesEdit.caption)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+                } label: {
+                    Text("Keep at most")
+                    // A second Text in a grouped row's label draws as its gray
+                    // subtitle. Shown only while the box holds a count that isn't
+                    // in force — how to apply it, or what the box accepts — so the
+                    // field never silently shows a number that isn't the real cap.
+                    if entriesEdit != .unchanged {
+                        Text(entriesEdit.caption)
+                    }
+                }
 
-            Divider().padding(.vertical, 4)
-
-            Picker("Storage budget:", selection: budgetSelection) {
-                ForEach(ClipdHistoryLimits.byteBudgetOptions, id: \.self) { option in
-                    Text(ClipdHistoryLimits.label(forBytes: option)).tag(option)
+                Picker("Storage budget", selection: budgetSelection) {
+                    ForEach(ClipdHistoryLimits.byteBudgetOptions, id: \.self) { option in
+                        Text(ClipdHistoryLimits.label(forBytes: option)).tag(option)
+                    }
                 }
             }
-            .frame(width: 240)
 
-            Divider().padding(.vertical, 4)
-
-            // Retention lives here, not in Capture: how LONG an entry is kept is
-            // the same question as how MANY are kept. Unlike the two caps above,
-            // this picker does offer a "never" row — that is the default and a
-            // normal choice, not the absurd value an unbounded cap would be.
-            // Its caveats (pins never expire) are in the confirmation it raises.
-            Picker("Delete entries older than:", selection: retentionSelection) {
-                ForEach(ClipdRetention.dayOptions, id: \.self) { days in
-                    Text(ClipdRetention.label(forDays: days)).tag(days)
+            // Retention lives in its own section, not folded into Limits: how LONG
+            // an entry is kept is a different question from how MANY are kept.
+            // Unlike the two caps above, this picker does offer a "never" row —
+            // that is the default and a normal choice, not the absurd value an
+            // unbounded cap would be. Its caveats (pins never expire) are in the
+            // confirmation it raises.
+            Section("Retention") {
+                Picker("Delete entries older than", selection: retentionSelection) {
+                    ForEach(ClipdRetention.dayOptions, id: \.self) { days in
+                        Text(ClipdRetention.label(forDays: days)).tag(days)
+                    }
                 }
+
+                // Its caveats (pins kept, best-effort) are in the confirmation
+                // that switching it on raises.
+                Toggle("Clear history when Clipd quits", isOn: clearOnQuitSelection)
             }
-            .frame(width: 260)
-
-            Divider().padding(.vertical, 4)
-
-            // Its caveats (pins kept, best-effort) are in the confirmation that
-            // switching it on raises.
-            Toggle("Clear history when Clipd quits", isOn: clearOnQuitSelection)
-                .toggleStyle(.checkbox)
         }
-        .padding(20)
+        .formStyle(.grouped)
+        .toggleStyle(WholeRowToggleStyle())
+        // Same sizing as the other panes: the window is sized to the pane, so the
+        // Form never needs to scroll, and fixedSize reports its full content
+        // height for that measurement.
+        .scrollDisabled(true)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 500)
         // A click on blank space or a label doesn't move keyboard focus on macOS,
         // so without this the field keeps focus and never commits. Filling the tab
         // with a tappable shape and dropping focus on a tap routes that click into
-        // the focus-loss commit below. The pickers and checkbox are AppKit
-        // controls that take their own clicks, so this never sees those.
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // the focus-loss commit below. The pickers and switch are AppKit controls
+        // that take their own clicks, so this never sees those.
         .contentShape(Rectangle())
         .onTapGesture { entriesFocused = false }
         .onAppear(perform: reseed)
@@ -163,8 +176,19 @@ struct HistorySettingsView: View {
         reseed()  // settings is the truth, whether the change applied, was cancelled, or was refused
     }
 
+    /// Settles a typed count before another control on this tab applies its own
+    /// change, so that change's confirmation is never asked with a count still
+    /// waiting behind it. The pickers and switch are AppKit controls that don't
+    /// take focus, so clicking them never runs the focus-loss commit on its own.
+    /// A cancel here doesn't block the other control: they're separate changes.
+    private func commitPendingEntries() {
+        guard entriesEdit != .unchanged else { return }
+        commitEntries()
+    }
+
     private func commitBudget(_ proposed: UInt64) {
         guard proposed != settings.maxBytes else { return }
+        commitPendingEntries()
         byteBudget = proposed  // show the click immediately; reseed corrects a cancel
         _ = onCommit(settings.maxEntries, proposed)
         reseed()
@@ -176,6 +200,7 @@ struct HistorySettingsView: View {
         Binding(get: { retentionDays },
                 set: { proposed in
                     guard proposed != settings.retentionDays else { return }
+                    commitPendingEntries()
                     retentionDays = proposed
                     _ = onCommitRetention(proposed)
                     reseed()
@@ -186,7 +211,10 @@ struct HistorySettingsView: View {
     /// confirmation, and a cancel must leave nothing persisted.
     private var clearOnQuitSelection: Binding<Bool> {
         Binding(get: { settings.clearsHistoryOnQuit },
-                set: { _ = onCommitClearOnQuit($0) })
+                set: { enabled in
+                    commitPendingEntries()
+                    _ = onCommitClearOnQuit(enabled)
+                })
     }
 }
 
@@ -291,6 +319,20 @@ private struct WholeRowToggleStyle: ToggleStyle {
             .contentShape(Rectangle())
             .onTapGesture { configuration.isOn.toggle() }
             .padding(-Self.rowInset)
+    }
+}
+
+private extension View {
+    /// The I-beam over a text field before it's clicked. The hosting view shows
+    /// the arrow over a field until it has focus, so without this the pointer
+    /// never says "editable" until the first click. `pointerStyle` is macOS 15+;
+    /// earlier systems keep the arrow until that click.
+    @ViewBuilder func textPointer() -> some View {
+        if #available(macOS 15, *) {
+            pointerStyle(.horizontalText)
+        } else {
+            self
+        }
     }
 }
 

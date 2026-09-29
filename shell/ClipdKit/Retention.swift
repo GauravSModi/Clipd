@@ -105,14 +105,11 @@ public func clipdRetentionChange(currentDays: Int,
 /// deliberately no confirmation at quit time — the user opted in here, and a
 /// dialog on every quit is the kind people learn to dismiss without reading.
 ///
-/// It names the three things that surprise people: it keeps pinned entries
-/// (the core's clear is clear-unpinned), it is best-effort, and it can make
-/// quitting slow because clearing rewrites the log.
+/// Short on purpose: it says what switching this on does, and that pinned
+/// entries are kept (the core's clear is clear-unpinned). The best-effort and
+/// slow-quit caveats were cut from the alert on 2026-09-29.
 public enum ClipdClearOnQuit {
-    public static let messageText = "Clear Clipd’s history every time you quit?"
+    public static let messageText = "Clear history when Clipd quits?"
     public static let informativeText =
-        "Each time Clipd quits normally it removes every unpinned entry from your "
-        + "history. Pinned entries are kept. This is best-effort — a force quit, a "
-        + "crash, or a sudden logout skips it — and on a large history, quitting "
-        + "can take a moment."
+        "Unpinned entries are removed each time Clipd quits. Pinned entries are kept."
 }
